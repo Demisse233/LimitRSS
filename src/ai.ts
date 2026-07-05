@@ -115,11 +115,38 @@ export class AIService {
             return { ok: true, msg: r.content.slice(0, 80), latencyMs: Date.now() - start };
         } catch (e) { return { ok: false, msg: (e as Error).message }; }
     }
+
+    async listModels(p: AIProvider): Promise<string[]> {
+        if (!p.endpoint) throw new Error("请先填写 Endpoint");
+        if (p.type === "anthropic") throw new Error("当前只支持 OpenAI 兼容接口自动获取模型");
+        return listOpenAICompatibleModels(p);
+    }
 }
 
 // =============== Provider 适配 ===============
 
 interface ChatResult { content: string; model: string; usage?: any }
+
+async function listOpenAICompatibleModels(p: AIProvider): Promise<string[]> {
+    const url = `${(p.endpoint || "").replace(/\/+$/, "")}/models`;
+    const headers: Record<string, string> = {};
+    if (p.apiKey) headers["Authorization"] = `Bearer ${p.apiKey}`;
+    const resp = await fetch(url, { method: "GET", headers });
+    if (!resp.ok) {
+        const t = await resp.text().catch(() => "");
+        throw new Error(`HTTP ${resp.status}: ${t.slice(0, 200) || resp.statusText}`);
+    }
+    const data: any = await resp.json();
+    const raw = Array.isArray(data?.data) ? data.data
+        : Array.isArray(data?.models) ? data.models
+            : Array.isArray(data) ? data
+                : [];
+    const ids: string[] = raw
+        .map((item: any) => typeof item === "string" ? item : item?.id || item?.name || item?.model)
+        .filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0)
+        .map((id: string) => id.trim());
+    return Array.from(new Set(ids)).sort((a, b) => a.localeCompare(b));
+}
 
 async function callProvider(
     p: AIProvider, messages: any[], stream: boolean,

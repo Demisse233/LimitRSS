@@ -18,6 +18,7 @@ const GENERIC_PROVIDER = {
 };
 
 const expandedProviders = new Set<string>();
+const providerModelOptions = new Map<string, string[]>();
 const LEGACY_PROVIDER_IDS = new Set(["p_openai", "p_deepseek", "p_zhipu", "p_ollama"]);
 const ACTIVE_PROMPT_IDS = new Set(DEFAULT_PROMPTS.map((p) => p.id));
 
@@ -88,7 +89,10 @@ export function openSettings(storage: Storage, ai: AIService) {
                 toast(`检测完成：${invalid.length} 个失效源`, invalid.length ? "warn" : "success", 4000);
             }, async () => {
                 const ids = storage.getSubs().filter((sub) => validationResults.get(sub.id)?.status === "invalid").map((sub) => sub.id);
-                if (!ids.length) return toast("没有检测到失效源", "info");
+                if (!ids.length) {
+                    toast("没有检测到失效源", "info");
+                    return;
+                }
                 if (!confirm(`删除检测出的 ${ids.length} 个失效源？对应文章也会一并移除。`)) return;
                 await storage.removeSubs(ids);
                 ids.forEach((id) => {
@@ -478,7 +482,7 @@ function renderProviderCard(p: AIProvider, idx: number, s: Storage, ai: AIServic
     body.appendChild(formRow("名称", input(p.name, (v) => { p.name = v; })));
     body.appendChild(formRow("Endpoint", input(p.endpoint || "", (v) => { p.endpoint = v; })));
     body.appendChild(formRow("API Key", input(p.apiKey || "", (v) => { p.apiKey = v; }, "password")));
-    body.appendChild(formRow("模型", input(p.model, (v) => { p.model = v; })));
+    body.appendChild(formRow("模型", renderModelPicker(p, ai, saveProvider)));
     body.appendChild(formRow("Temperature", numberInput(p.temperature ?? 0.7, (v) => { p.temperature = v; })));
     body.appendChild(formRow("Max Tokens", numberInput(p.maxTokens ?? 2048, (v) => { p.maxTokens = v; })));
     body.appendChild(el("div", { class: "ar-provider__body-actions" }, [
@@ -512,8 +516,70 @@ function renderProviderCard(p: AIProvider, idx: number, s: Storage, ai: AIServic
             i.addEventListener("input", save);
             i.addEventListener("change", save);
         });
+        body.querySelectorAll("select").forEach((i) => {
+            i.addEventListener("change", save);
+        });
     }, 0);
     return card;
+}
+
+function renderModelPicker(p: AIProvider, ai: AIService, saveProvider: () => void): HTMLElement {
+    const wrap = el("div", { class: "ar-model-picker" });
+    const field = input(p.model, (v) => { p.model = v; });
+    field.placeholder = "输入模型名称，或点击获取后选择";
+    wrap.appendChild(field);
+
+    const optionsWrap = el("div", { class: "ar-model-picker__options" });
+    const renderOptions = () => {
+        clear(optionsWrap);
+        const options = providerModelOptions.get(p.id) || [];
+        if (!options.length) return;
+        const select = el("select", {
+            class: "b3-select ar-model-picker__select",
+            onchange: (ev: Event) => {
+                const value = (ev.currentTarget as HTMLSelectElement).value;
+                if (!value) return;
+                p.model = value;
+                field.value = value;
+                saveProvider();
+            },
+        }, [
+            el("option", { value: "" }, ["选择模型"]),
+            ...options.map((model) => el("option", {
+                value: model,
+                selected: model === p.model,
+            }, [model])),
+        ]);
+        optionsWrap.appendChild(select);
+    };
+
+    const fetchBtn = button({
+        text: "获取模型",
+        size: "sm",
+        variant: "secondary",
+        onclick: async (ev) => {
+            const b = ev.currentTarget as HTMLButtonElement;
+            const oldText = b.textContent || "获取模型";
+            b.disabled = true;
+            b.textContent = "获取中…";
+            try {
+                const models = await ai.listModels({ ...p, type: p.type === "anthropic" ? "anthropic" : "custom" });
+                providerModelOptions.set(p.id, models);
+                renderOptions();
+                if (models.length) toast(`已获取 ${models.length} 个模型`, "success");
+                else toast("没有获取到可用模型", "error", 5000);
+            } catch (err) {
+                toast((err as Error).message || "获取模型失败", "error", 5000);
+            } finally {
+                b.disabled = false;
+                b.textContent = oldText;
+            }
+        },
+    });
+    wrap.appendChild(el("div", { class: "ar-model-picker__actions" }, [fetchBtn]));
+    wrap.appendChild(optionsWrap);
+    renderOptions();
+    return wrap;
 }
 
 function renderPrompts(main: HTMLElement, s: Storage) {

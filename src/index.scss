@@ -1245,6 +1245,19 @@ select.ar-input {
 .ar-provider__body { display: none; padding: 12px; flex-direction: column; gap: 8px; }
 .ar-provider--open .ar-provider__body { display: flex; }
 .ar-provider__body-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px; }
+.ar-model-picker {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+}
+.ar-model-picker__actions { display: flex; justify-content: flex-end; }
+.ar-model-picker__options { grid-column: 1 / -1; }
+.ar-model-picker__select {
+    width: 100%;
+    height: 32px;
+    padding: 0 30px 0 10px;
+}
 .ar-sub-manage__bar {
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     padding: 10px; background: var(--ar-bg-secondary);
