@@ -1,0 +1,47 @@
+{
+  "name": "limitrss",
+  "version": "0.1.0",
+  "description": "LimitRSS, an AI-powered RSS reader plugin for SiYuan Note",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Demisse233/LimitRSS.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Demisse233/LimitRSS/issues"
+  },
+  "homepage": "https://github.com/Demisse233/LimitRSS#readme",
+  "scripts": {
+    "dev": "webpack --config webpack.config.js --mode development --watch",
+    "build": "webpack --config webpack.config.js --mode production",
+    "type-check": "tsc --noEmit",
+    "dev:once": "webpack --config webpack.config.js --mode development"
+  },
+  "keywords": [
+    "siyuan",
+    "rss",
+    "ai",
+    "reader",
+    "plugin"
+  ],
+  "author": "demisse",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/dompurify": "^3.0.5",
+    "copy-webpack-plugin": "^11.0.0",
+    "css-loader": "^6.8.1",
+    "mini-css-extract-plugin": "^2.7.6",
+    "sass": "^1.63.6",
+    "sass-loader": "^13.3.2",
+    "ts-loader": "^9.4.4",
+    "typescript": "^5.1.6",
+    "webpack": "^5.88.1",
+    "webpack-cli": "^5.1.4",
+    "zip-webpack-plugin": "^4.0.3"
+  },
+  "dependencies": {
+    "@iconify-icons/solar": "^1.2.3",
+    "dompurify": "^3.1.6",
+    "siyuan": "^1.2.0"
+  }
+}

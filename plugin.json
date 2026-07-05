@@ -1,0 +1,39 @@
+{
+  "name": "LimitRSS",
+  "author": "demisse",
+  "url": "https://github.com/Demisse233/LimitRSS",
+  "version": "0.1.0",
+  "minAppVersion": "3.7.0",
+  "backends": ["windows", "linux", "darwin", "docker", "android", "ios", "harmony", "all"],
+  "frontends": ["desktop", "mobile", "browser-desktop", "browser-mobile", "desktop-window", "all"],
+  "disabledInPublish": false,
+  "displayName": {
+    "default": "LimitRSS",
+    "zh-CN": "LimitRSS"
+  },
+  "description": {
+    "default": "AI-powered RSS reader for focused reading in SiYuan.",
+    "zh-CN": "思源笔记的 AI RSS 阅读器，用 AI 收敛信息噪音。"
+  },
+  "readme": {
+    "default": "README.md",
+    "zh-CN": "README.zh-CN.md"
+  },
+  "funding": {
+    "custom": []
+  },
+  "keywords": [
+    "RSS",
+    "AI",
+    "Reader",
+    "Subscription",
+    "Feed",
+    "Summary",
+    "Translation",
+    "Knowledge",
+    "订阅",
+    "阅读器",
+    "总结",
+    "翻译"
+  ]
+}
