@@ -1,162 +1,119 @@
-# LimitRSS · AI-powered RSS reader for SiYuan
+# LimitRSS · 思源笔记 AI RSS 阅读器
 
-> 📡 打破信息获取与知识内化的壁垒。订阅、阅读、让 AI 帮你总结、翻译，把文章变成你的知识库。
+> 打破信息获取与知识内化的壁垒。订阅、阅读、让 AI 帮你总结、翻译，把文章变成你的知识库。
 
-[中文文档](./README.zh-CN.md) · [Report Bug](https://github.com/Demisse233/LimitRSS/issues) · [Request Feature](https://github.com/Demisse233/LimitRSS/issues)
+[English](./README.en.md) · [反馈问题](https://github.com/Demisse233/LimitRSS/issues) · [功能建议](https://github.com/Demisse233/LimitRSS/issues)
 
-## ✨ Features
+## 核心特性
 
-### Core
-- 📡 **Full RSS/Atom Support** — Subscribe, organize, refresh, manage errors
-- 🗂 **OPML Import/Export** — Migrate from other readers, backup easily
-- ⭐ **Star / Read / Unread** — Track important articles, automatic read state
-- 🔍 **Search & Filter** — Full-text search, filter by read state, source, AI status
-- 📦 **Categorization** — Custom categories with colors, drag-to-reorder
-- 🌗 **Theme Aware** — Follows SiYuan's light/dark mode
+### 基础
+- **完整 RSS / Atom 支持**：订阅、分类、刷新、错误处理
+- **OPML 导入导出**：从其它阅读器迁移、备份
+- **星标 / 已读 / 未读**：标记重要文章、自动已读
+- **搜索与筛选**：全文搜索、按状态和来源筛选
+- **分类管理**：自定义分类、配色、排序
+- **主题跟随**：自动适配思源的亮色与暗色主题
 
-### 🤖 AI-Powered (user-provided)
-- 🧠 **Multiple Providers** — OpenAI, Anthropic, DeepSeek, Zhipu GLM, Ollama, any OpenAI-compatible
-- 📝 **One-Click Actions** — Summarize, translate, extract key points, action items, mind map, smart tags
-- 💡 **Custom Prompts** — Write your own prompt templates with `{{title}} {{content}}` variables
-- 🗞 **Daily Digest** — Group multiple articles into a thematic briefing
-- 📊 **Token Usage Tracking** — See how much you've spent
-- ⚡ **Result Caching** — Same article + same prompt = no double-spend
+### AI 能力（用户自配）
+- **通用 OpenAI 兼容接口**：配置 Endpoint、API Key 和模型即可使用
+- **AI 总结**：把文章总结成一段话，直接插入正文顶部
+- **AI 翻译**：保留原文结构，支持流式替换翻译
+- **AI 日报**：按日期聚合文章，生成分类摘要并附文章跳转
+- **自定义提示词**：用 `{{title}}`、`{{content}}` 等变量编写模板
 
-### 💾 Save to SiYuan
-- 📥 **One-Click Save** — Convert article to SiYuan document with template
-- 🏷 **Auto Tagging** — Write source, URL, and custom tags as block attributes
-- 🖼 **Image Localization** — Download remote images to local assets
-- 📋 **Multiple Notebooks** — Choose where to save each article
-- 📑 **Template System** — Customize output format with variables
+### 保存到思源
+- **一键保存**：把文章转成思源文档，支持模板
+- **自动属性**：写来源、原文链接、自定义标签到块属性
+- **图片本地化**：远程图片下载到本地资源
+- **多笔记本**：选择保存到哪个笔记本
+- **模板系统**：自定义输出格式
 
-### ⌨️ Keyboard
-| Key | Action |
+### 快捷键
+| 键 | 操作 |
 |---|---|
-| `J` / `K` | Next / Previous article |
-| `M` | Toggle read/unread |
-| `S` | Toggle star |
-| `O` | Open original |
-| `⌘S` | Save to SiYuan |
-| `R` | Refresh |
-| `⌘F` | Search |
-| `I` | Toggle AI panel |
-| `?` | Show help |
+| `J` / `K` | 下一篇 / 上一篇 |
+| `M` | 切换已读/未读 |
+| `S` | 切换星标 |
+| `O` | 打开原文 |
+| `⌘S` | 保存到思源 |
+| `R` | 刷新 |
+| `⌘F` | 搜索 |
+| `I` | 切换 AI 面板 |
+| `?` | 显示帮助 |
 
-## 🚀 Installation
+## 安装
 
-### From Bazaar (recommended)
-1. Open SiYuan → Settings → Marketplace
-2. Search "LimitRSS"
-3. Click Install
+### 从集市（推荐）
+1. 打开思源 → 设置 → 集市
+2. 搜索 "LimitRSS"
+3. 点击安装
 
-### Manual
-1. Download the latest `package.zip` from [Releases](https://github.com/Demisse233/LimitRSS/releases)
-2. Extract to `{workspace}/data/plugins/LimitRSS/`
-3. Restart SiYuan or reload plugins
+### 手动安装
+1. 从 [Releases](https://github.com/Demisse233/LimitRSS/releases) 下载最新 `package.zip`
+2. 解压到 `{工作空间}/data/plugins/LimitRSS/`
+3. 重启思源或重新加载插件
 
-### From Source
+### 从源码
 ```bash
 git clone https://github.com/Demisse233/LimitRSS.git
 cd LimitRSS
 npm install
-npm run dev      # watch mode
-# or
-npm run build    # production
+npm run dev      # 监听模式
+# 或
+npm run build    # 生产构建
 ```
-Copy the `dist/` folder to `{workspace}/data/plugins/LimitRSS/`.
+将 `dist/` 目录复制到 `{工作空间}/data/plugins/LimitRSS/`。
 
-## ⚙️ Configuration
+## 配置
 
-### AI Provider Setup
-1. Click the ⚙️ button in the sidebar
-2. Go to **AI Providers** section
-3. Click **+ Add Provider** and select your service
-4. Fill in API Key, endpoint, model
-5. Click **Test** to verify connection
-6. Optionally set as **Default**
+### 配置 AI 提供商
+1. 点击侧栏底部的设置按钮
+2. 进入 **AI 提供商** 面板
+3. 添加或展开通用提供商
+4. 填入 Endpoint、API Key、模型等参数
+5. 点击 **测试** 验证连通
+6. 打开启用开关
 
-**Supported providers**:
-- **OpenAI**: `https://api.openai.com/v1`, model `gpt-4o-mini`
-- **Anthropic**: `https://api.anthropic.com`, model `claude-3-5-sonnet-20241022`
-- **DeepSeek**: `https://api.deepseek.com/v1`, model `deepseek-chat`
-- **Zhipu GLM**: `https://open.bigmodel.cn/api/paas/v4`, model `glm-4-flash`
-- **Ollama** (local): `http://localhost:11434/v1`, any model
-- **Custom**: Any OpenAI-compatible endpoint
+LimitRSS 使用 OpenAI 兼容接口。OpenAI、DeepSeek、Ollama、硅基流动、OpenRouter 等兼容服务都可以通过自定义 Endpoint 接入。
 
-> 🔒 Your API keys are stored only in your local SiYuan workspace. AI requests go directly from your browser to the provider, never through any intermediary server.
+> API Key 仅存储在你的思源工作空间内，AI 请求直接从浏览器发到对应提供商，不经过任何中间服务器。
 
-### Custom Prompts
-1. Settings → Prompt Templates
-2. Click **+ New Prompt**
-3. Set name, icon, system prompt, user prompt
-4. Use variables: `{{title}}` `{{content}}` `{{author}}` `{{link}}` `{{date}}` `{{description}}` `{{source}}`
+### 自定义提示词
+1. 设置 → 提示词模板
+2. 点击 **+ 新建提示词**
+3. 设置名称、图标、系统提示、用户提示
+4. 可用变量：`{{title}}` `{{content}}` `{{author}}` `{{link}}` `{{date}}` `{{description}}` `{{source}}`
 
-## 📁 Project Structure
-
-```
-LimitRSS/
-├── plugin.json            # Plugin manifest
-├── package.json
-├── src/
-│   ├── index.ts          # Main entry
-│   ├── index.scss        # Styles
-│   ├── core/             # Core (no UI deps)
-│   │   ├── types.ts
-│   │   ├── storage.ts
-│   │   ├── fetcher.ts    # browser fetch + SiYuan forwardProxy fallback
-│   │   ├── rss-parser.ts
-│   │   ├── sanitizer.ts  # DOMPurify wrapper
-│   │   ├── readability.ts
-│   │   ├── html-to-md.ts
-│   │   ├── opml.ts
-│   │   └── featured-feeds.ts
-│   ├── ai/
-│   │   ├── provider-base.ts
-│   │   └── ai-service.ts
-│   ├── ui/
-│   │   ├── tab/          # Main 3-pane layout
-│   │   ├── components/   # Reusable UI
-│   │   ├── settings/
-│   │   ├── dialogs/
-│   │   └── styles/       # SCSS partials
-│   ├── utils/
-│   └── i18n/             # zh-CN, en
-├── docs/
-└── README*.md
-```
-
-## 🛠 Development
+## 开发
 
 - Node.js >= 18
 - npm >= 9
 - TypeScript 5
 
 ```bash
-# Install
+# 安装依赖
 npm install
 
-# Dev (watch mode)
+# 开发（监听）
 npm run dev
 
-# Type check
+# 类型检查
 npm run type-check
 
-# Build production
+# 生产构建
 npm run build
 ```
 
-The build output goes to `dist/`. Copy `dist/*` (along with `package.json`, `icon.png`, `preview.png`) into `{workspace}/data/plugins/LimitRSS/`.
+构建产物在 `dist/` 目录，复制到 `{工作空间}/data/plugins/LimitRSS/` 即可。
 
-## 🤝 Contributing
+## 贡献
 
-Issues and PRs welcome! See [Issues](https://github.com/Demisse233/LimitRSS/issues).
+欢迎 Issue 和 PR！到 [Issues](https://github.com/Demisse233/LimitRSS/issues) 反馈。
 
-## 📄 License
+## 许可
 
 MIT © 2026 demisse
 
-## 🙏 Acknowledgments
+## 致谢
 
-- [SiYuan Note](https://github.com/siyuan-note/siyuan) — A powerful block-level personal knowledge management system
-- [Folo](https://github.com/RSSNext/Folo) — UI inspiration
-- [DOMPurify](https://github.com/cure53/DOMPurify) — HTML sanitization
+- [思源笔记](https://github.com/siyuan-note/siyuan) — 强大的块级个人知识管理系统
