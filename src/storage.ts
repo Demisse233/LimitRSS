@@ -6,6 +6,8 @@
 import { Plugin } from "siyuan";
 import { Article, Category, Subscription, Settings, AISettings, KEYS, DEFAULT_SETTINGS, DEFAULT_AI } from "./types";
 
+const LEGACY_PLUGIN_STORAGE_DIRS = ["ai-rss"];
+
 type SubscriptionStore = {
     meta?: {
         revision?: number;
@@ -50,13 +52,13 @@ export class Storage {
 
     private async load() {
         const [s, c, a, r, st, sg, ai] = await Promise.all([
-            this.plugin.loadData(KEYS.subs) as Promise<any>,
-            this.plugin.loadData(KEYS.cats) as Promise<any>,
-            this.plugin.loadData(KEYS.articles) as Promise<any>,
-            this.plugin.loadData(KEYS.read) as Promise<any>,
-            this.plugin.loadData(KEYS.star) as Promise<any>,
-            this.plugin.loadData(KEYS.settings) as Promise<any>,
-            this.plugin.loadData(KEYS.ai) as Promise<any>,
+            this.loadDataWithLegacyFallback(KEYS.subs),
+            this.loadDataWithLegacyFallback(KEYS.cats),
+            this.loadDataWithLegacyFallback(KEYS.articles),
+            this.loadDataWithLegacyFallback(KEYS.read),
+            this.loadDataWithLegacyFallback(KEYS.star),
+            this.loadDataWithLegacyFallback(KEYS.settings),
+            this.loadDataWithLegacyFallback(KEYS.ai),
         ]);
         const subStore = this.normalizeSubStore(s);
         this.subs = subStore.items;
@@ -86,6 +88,47 @@ export class Storage {
         for (const a of this.articles.values()) {
             a.isRead = this.read.has(a.id);
             a.isStarred = this.star.has(a.id);
+        }
+    }
+
+    private async loadDataWithLegacyFallback(key: string): Promise<any> {
+        const current = await this.plugin.loadData(key);
+        if (current !== undefined && current !== null) return current;
+        const legacy = await this.loadLegacyData(key);
+        if (legacy !== undefined && legacy !== null) {
+            await this.plugin.saveData(key, this.snapshot(legacy));
+            console.info(`[ai-rss] migrated legacy data key ${key}`);
+            return legacy;
+        }
+        return current;
+    }
+
+    private async loadLegacyData(key: string): Promise<any> {
+        for (const dir of LEGACY_PLUGIN_STORAGE_DIRS) {
+            const text = await this.getWorkspaceFileText(`/data/storage/petal/${dir}/${key}`);
+            if (!text || !text.trim()) continue;
+            try {
+                const parsed = JSON.parse(text);
+                if (parsed && typeof parsed === "object" && "code" in parsed && "msg" in parsed && !("items" in parsed)) continue;
+                return parsed;
+            } catch {
+                return text;
+            }
+        }
+        return undefined;
+    }
+
+    private async getWorkspaceFileText(path: string): Promise<string | undefined> {
+        try {
+            const resp = await fetch("/api/file/getFile", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path }),
+            });
+            if (!resp.ok) return undefined;
+            return await resp.text();
+        } catch {
+            return undefined;
         }
     }
 
