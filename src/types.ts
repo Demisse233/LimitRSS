@@ -64,7 +64,7 @@ export interface AISettings {
 }
 
 export interface Settings {
-    general: { language: string; articlesPerPage: number; autoRefresh: number; fullText?: boolean; articleRetentionDays: number; };
+    general: { language: string; articlesPerPage: number; autoRefresh: number; fullText?: boolean; articleRetentionDays: number; rsshubBaseUrl: string; };
     display: { fontSize: number; lineHeight: number; theme: string; };
     reading: { fadeReadArticles: boolean; boundaryScrollSwitch: boolean; boundaryConfirmDelayMs: number; boundaryCooldownMs: number; boundaryTriggerDistance: number; };
     save: { template: string; includeSourceLink: boolean; downloadImages: boolean; };
@@ -101,7 +101,7 @@ export const DEFAULT_PROMPTS: PromptTemplate[] = [
 ];
 
 export const DEFAULT_SETTINGS: Settings = {
-    general: { language: "auto", articlesPerPage: 30, autoRefresh: 30, fullText: true, articleRetentionDays: 7 },
+    general: { language: "auto", articlesPerPage: 30, autoRefresh: 30, fullText: true, articleRetentionDays: 7, rsshubBaseUrl: "https://rsshub.app" },
     display: { fontSize: 15, lineHeight: 1.7, theme: "auto" },
     reading: { fadeReadArticles: true, boundaryScrollSwitch: true, boundaryConfirmDelayMs: 120, boundaryCooldownMs: 700, boundaryTriggerDistance: 95 },
     save: {

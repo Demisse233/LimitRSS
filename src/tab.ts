@@ -32,6 +32,13 @@ function postProcess(html: string): string {
     div.innerHTML = html;
     div.querySelectorAll("a").forEach((a) => { a.setAttribute("target", "_blank"); a.setAttribute("rel", "noopener noreferrer"); });
     div.querySelectorAll("img").forEach((i) => { i.setAttribute("loading", "lazy"); });
+    Array.from(div.querySelectorAll("table")).forEach((table) => {
+        if (table.parentElement?.classList.contains("ar-rd__table-scroll")) return;
+        const wrapper = document.createElement("div");
+        wrapper.className = "ar-rd__table-scroll";
+        table.parentNode?.insertBefore(wrapper, table);
+        wrapper.appendChild(table);
+    });
     return div.innerHTML;
 }
 
@@ -443,7 +450,7 @@ class Sidebar {
     }
 
     showAddDialog(categoryId?: string) {
-        const urlInput = el("input", { class: "ar-input", type: "url", placeholder: "https://example.com/feed" }) as HTMLInputElement;
+        const urlInput = el("input", { class: "ar-input", type: "text", placeholder: "https://example.com/feed 或 rsshub://github/trending/weekly/any", spellcheck: "false" }) as HTMLInputElement;
         const nameInput = el("input", { class: "ar-input", type: "text", placeholder: "显示名称（可选）" }) as HTMLInputElement;
         const resultEl = el("div", { class: "ar-form__hint" });
         const test = async () => {
@@ -451,7 +458,7 @@ class Sidebar {
             if (!url) return toast("请先填写 URL", "warn");
             resultEl.textContent = "抓取中…";
             try {
-                const f = await fetchAndParse(url);
+                const f = await fetchAndParse(url, this.storage.getSettings().general.rsshubBaseUrl);
                 if (!nameInput.value) nameInput.value = f.title;
                 if (f.favicon) urlInput.dataset.favicon = f.favicon;
                 if (f.siteUrl) urlInput.dataset.siteUrl = f.siteUrl;
@@ -467,7 +474,7 @@ class Sidebar {
             if (!url) return toast("请填写 URL", "warn");
             let parsed: Awaited<ReturnType<typeof fetchAndParse>> | undefined;
             try {
-                parsed = await fetchAndParse(url);
+                parsed = await fetchAndParse(url, this.storage.getSettings().general.rsshubBaseUrl);
             } catch (e) {
                 return toast("订阅源不可用：" + (e as Error).message, "error", 4000);
             }
@@ -491,6 +498,7 @@ class Sidebar {
             width: "480px",
             content: el("div", {}, [
                 el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["RSS / URL *"]), urlInput]),
+                el("div", { class: "ar-form__hint" }, ["支持普通 RSS / Atom 地址，以及 Folo 使用的 rsshub:// 路由格式。"]),
                 el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["显示名称"]), nameInput]),
                 resultEl,
             ]),
@@ -572,7 +580,7 @@ class Sidebar {
             renderPreview();
             try {
                 const parsed = await Promise.race([
-                    fetchAndParse(feed.url),
+                    fetchAndParse(feed.url, this.storage.getSettings().general.rsshubBaseUrl),
                     new Promise<never>((_, reject) => setTimeout(() => reject(new Error("测试超时")), 15_000)),
                 ]);
                 if (!parsed.articles.length) throw new Error("没有文章");
@@ -816,9 +824,7 @@ class Sidebar {
         ev?.stopPropagation();
         const items: DropdownItem[] = [
             { label: "立即刷新", icon: "refresh", onClick: () => this.onRefresh(s.id) },
-            { label: "重命名", icon: "edit", onClick: () => {
-                const n = prompt("新名称", s.name); if (n) this.storage.patchSubMeta(s.id, { name: n });
-            }},
+            { label: "重命名", icon: "edit", onClick: () => this.showRenameSubDialog(s) },
             { divider: true, label: "" },
             { label: "暂停/恢复", icon: s.enabled ? "pause" : "play", onClick: () => this.storage.patchSubMeta(s.id, { enabled: !s.enabled }) },
             { divider: true, label: "" },
@@ -827,6 +833,46 @@ class Sidebar {
             }},
         ];
         dropdown(target, items);
+    }
+
+    private showRenameSubDialog(s: Subscription) {
+        const nameInput = el("input", {
+            class: "ar-input",
+            type: "text",
+            value: s.name,
+            placeholder: "订阅源名称",
+        }) as HTMLInputElement;
+        const doSave = async () => {
+            const name = nameInput.value.trim();
+            if (!name) return toast("订阅源名称不能为空", "warn");
+            const latest = this.storage.getSub(s.id);
+            if (!latest) {
+                dialog.close();
+                return toast("订阅源不存在或已被删除", "error");
+            }
+            await this.storage.patchSubMeta(s.id, { name });
+            dialog.close();
+            toast(`已重命名为「${name}」`, "success", 1800);
+        };
+        nameInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") doSave();
+        });
+        const dialog = modal({
+            title: "重命名订阅源",
+            width: "420px",
+            content: el("div", { class: "ar-form__row" }, [
+                el("label", { class: "ar-form__label" }, ["显示名称"]),
+                nameInput,
+            ]),
+            footer: [
+                button({ text: "取消", variant: "ghost", onclick: () => dialog.close() }),
+                button({ text: "保存", variant: "primary", onclick: doSave }),
+            ],
+        });
+        setTimeout(() => {
+            nameInput.focus();
+            nameInput.select();
+        }, 0);
     }
 
     openCatMenu(target: HTMLElement, catId: string, catName: string, ev?: MouseEvent) {
@@ -2154,7 +2200,7 @@ export class RssTab {
         this.list?.setRefreshStatus("refreshing");
         for (const sub of subs) {
             try {
-                const f = await fetchAndParse(sub.url);
+                const f = await fetchAndParse(sub.url, this.storage.getSettings().general.rsshubBaseUrl);
                 if (!this.storage.getSub(sub.id)) continue;
                 const articles = f.articles.filter((a) => a.link).map((a) => ({
                     id: articleId(sub.id, a.link),

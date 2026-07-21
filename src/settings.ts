@@ -75,7 +75,7 @@ export function openSettings(storage: Storage, ai: AIService) {
                 const workers = Array.from({ length: Math.min(4, subs.length) }, async () => {
                     while (index < subs.length) {
                         const sub = subs[index++];
-                        validationResults.set(sub.id, await validateSubscription(sub));
+                        validationResults.set(sub.id, await validateSubscription(sub, storage.getSettings().general.rsshubBaseUrl));
                         done++;
                         notice.update(`正在检测订阅源 ${done}/${subs.length}…`);
                     }
@@ -189,10 +189,10 @@ function rawCheck(checked: boolean, onChange: (v: boolean) => void) {
     return c;
 }
 
-async function validateSubscription(sub: Subscription): Promise<SubValidationResult> {
+async function validateSubscription(sub: Subscription, rsshubBaseUrl?: string): Promise<SubValidationResult> {
     try {
         const parsed = await Promise.race([
-            fetchAndParse(sub.url),
+            fetchAndParse(sub.url, rsshubBaseUrl),
             new Promise<never>((_, reject) => setTimeout(() => reject(new Error("检测超时")), 15_000)),
         ]);
         if (!parsed.articles.length) throw new Error("没有文章");
@@ -218,6 +218,8 @@ function renderGeneral(main: HTMLElement, s: Storage) {
     ], (v) => updateGeneral({ language: v }))));
     wrap.appendChild(formRow("每页文章数", numberInput(settings.general.articlesPerPage, (v) => updateGeneral({ articlesPerPage: v }))));
     wrap.appendChild(formRow("自动刷新间隔（分钟，0=关）", numberInput(settings.general.autoRefresh, (v) => updateGeneral({ autoRefresh: v }))));
+    wrap.appendChild(formRow("RSSHub 实例地址", input(settings.general.rsshubBaseUrl || "https://rsshub.app", (v) => updateGeneral({ rsshubBaseUrl: v.trim() }))));
+    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["用于解析 rsshub:// 路由；可填写自建实例地址，默认使用 https://rsshub.app。"]));
     wrap.appendChild(formRow("自动清理旧文章（天，0=关）", numberInput(settings.general.articleRetentionDays ?? 7, (v) => {
         updateGeneral({ articleRetentionDays: Math.max(0, Math.round(v)) });
         s.cleanupExpiredArticles();

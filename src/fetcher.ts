@@ -3,6 +3,7 @@
  */
 
 const USER_AGENT = "Mozilla/5.0 (compatible; SiYuan-AI-RSS/0.1)";
+const DEFAULT_RSSHUB_BASE_URL = "https://rsshub.app";
 
 export interface ParsedFeed {
     title: string;
@@ -22,6 +23,53 @@ export interface ParsedArticle {
     thumbnail?: string;
 }
 
+function responseError(url: string, status?: number, body = ""): Error {
+    const code = status ? `HTTP ${status}` : "";
+    const text = body.trim();
+    const isHtml = /^\s*(?:<!doctype\s+html|<html\b)/i.test(text);
+
+    if (status === 401 || status === 403) {
+        const target = /^https?:\/\/rsshub\.app(?:\/|$)/i.test(url) ? "RSSHub 官方测试实例" : "RSSHub 实例";
+        return new Error(`${target}拒绝访问（${code}），请在设置中更换或自建 RSSHub 实例`);
+    }
+    if (status && status >= 400) {
+        return new Error(`RSSHub 实例请求失败（${code}）`);
+    }
+    if (isHtml) {
+        return new Error("RSSHub 实例返回了 HTML 页面而不是 RSS XML，可能被验证页或反爬机制拦截");
+    }
+    return new Error("RSSHub 实例返回的内容不是有效的 RSS / Atom XML");
+}
+
+function ensureFeedResponse(url: string, body: unknown, status?: number): string {
+    const text = typeof body === "string" ? body : "";
+    if (status && (status < 200 || status >= 300)) throw responseError(url, status, text);
+    if (!text.trim()) throw new Error("RSSHub 实例返回了空内容");
+
+    const normalized = text.replace(/^\uFEFF/, "").trimStart();
+    if (!/^<\?xml\b/i.test(normalized)
+        && !/^<(?:rss|feed|rdf:RDF)\b/i.test(normalized)) {
+        throw responseError(url, status, text);
+    }
+    return text;
+}
+
+/**
+ * Folo and RSSHub-aware readers use rsshub:// as a portable route URL.
+ * Keep that value in storage, and resolve it only when making a request.
+ */
+export function resolveFeedUrl(input: string, rsshubBaseUrl = DEFAULT_RSSHUB_BASE_URL): string {
+    const url = (input || "").trim();
+    if (!/^rsshub:\/\//i.test(url)) return url;
+
+    const route = url.replace(/^rsshub:\/\/+?/i, "").replace(/^\/+/, "");
+    if (!route) throw new Error("RSSHub 路由不能为空");
+
+    const base = (rsshubBaseUrl || DEFAULT_RSSHUB_BASE_URL).trim().replace(/\/+$/, "");
+    if (!/^https?:\/\//i.test(base)) throw new Error("RSSHub 实例地址必须以 http:// 或 https:// 开头");
+    return `${base}/${route}`;
+}
+
 export async function fetchXML(url: string): Promise<string> {
     // 优先浏览器 fetch
     try {
@@ -33,17 +81,15 @@ export async function fetchXML(url: string): Promise<string> {
             headers: { "User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*" },
         });
         clearTimeout(timer);
-        if (r.ok) {
-            const text = await r.text();
-            if (text && text.trim()) return text;
-        }
+        const text = await r.text();
+        if (r.ok) return ensureFeedResponse(url, text, r.status);
     } catch (e) { /* fall through */ }
     // 兜底：思源内核 forwardProxy
     try {
         const siyuan = (window as any).siyuan;
         if (siyuan?.api?.forwardProxy) {
             const r = await siyuan.api.forwardProxy(url, { method: "GET", timeout: 30000 });
-            if (r?.body) return r.body;
+            if (r?.body || r?.status) return ensureFeedResponse(url, r.body, Number(r.status) || undefined);
         }
         // 用 fetchSyncPost
         const { fetchSyncPost } = await import("siyuan");
@@ -51,7 +97,9 @@ export async function fetchXML(url: string): Promise<string> {
             url, method: "GET", timeout: 30000,
             headers: { "User-Agent": USER_AGENT },
         });
-        if (r.code === 0 && r.data?.body) return r.data.body;
+        if (r.code === 0 && (r.data?.body || r.data?.status)) {
+            return ensureFeedResponse(url, r.data.body, Number(r.data.status) || undefined);
+        }
         throw new Error(r.msg || "empty body");
     } catch (e) {
         throw new Error("Failed to fetch " + url + ": " + (e as Error).message);
@@ -144,7 +192,8 @@ export function parseXML(xml: string, sourceUrl: string): ParsedFeed {
     return { title, siteUrl: siteUrl || sourceUrl, description, favicon, articles };
 }
 
-export async function fetchAndParse(url: string): Promise<ParsedFeed> {
-    const xml = await fetchXML(url);
-    return parseXML(xml, url);
+export async function fetchAndParse(url: string, rsshubBaseUrl?: string): Promise<ParsedFeed> {
+    const requestUrl = resolveFeedUrl(url, rsshubBaseUrl);
+    const xml = await fetchXML(requestUrl);
+    return parseXML(xml, requestUrl);
 }
