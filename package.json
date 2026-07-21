@@ -1,6 +1,6 @@
 {
   "name": "limitrss",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "LimitRSS, an AI-powered RSS reader plugin for SiYuan Note",
   "main": "index.js",
   "repository": {

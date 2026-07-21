@@ -645,7 +645,7 @@ function renderAbout(main: HTMLElement) {
     wrap.appendChild(el("div", { class: "ar-about" }, [
         el("div", { class: "ar-about__logo" }, [makeIcon("rssMain", 48)]),
         el("h2", {}, ["LimitRSS"]),
-        el("p", { class: "ar-about__ver" }, ["v0.1.3 · 2026-07-21"]),
+        el("p", { class: "ar-about__ver" }, ["v0.1.4 · 2026-07-21"]),
         el("p", {}, ["用 AI 收敛信息噪音的 RSS 阅读器。"]),
         el("hr"),
         el("h3", {}, ["特性"]),
