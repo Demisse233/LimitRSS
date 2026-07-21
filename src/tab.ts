@@ -9,7 +9,7 @@ import { button, dropdown, DropdownItem, toast, modal, empty, spinner } from "./
 import { Storage } from "./storage";
 import { AIService } from "./ai";
 import { Article, Subscription, AIResult, FEATURED, FEATURED_CATS, PromptTemplate, Category } from "./types";
-import { fetchAndParse } from "./fetcher";
+import { fetchAndParse, resolveSubscriptionFavicon } from "./fetcher";
 import { fetchFullText } from "./fulltext";
 import { saveMarkdownToSiyuan, saveToSiyuan } from "./save";
 import { openSettings } from "./settings";
@@ -479,13 +479,19 @@ class Sidebar {
                 return toast("订阅源不可用：" + (e as Error).message, "error", 4000);
             }
             const name = nameInput.value.trim() || parsed.title || url;
+            const faviconInfo = await resolveSubscriptionFavicon({
+                feedFavicon: parsed.favicon || urlInput.dataset.favicon,
+                siteUrl: parsed.siteUrl || urlInput.dataset.siteUrl || url,
+                always: true,
+            });
             const s: Subscription = {
                 id: genId("sub_"), url, name, enabled: true, errorCount: 0,
                 categoryId: categoryId && categoryId !== "c_default" ? categoryId : undefined,
                 categoryName: categoryId && categoryId !== "c_default" ? this.storage.getCats().find((c) => c.id === categoryId)?.name : undefined,
                 siteUrl: parsed.siteUrl || urlInput.dataset.siteUrl,
                 description: parsed.description || urlInput.dataset.description,
-                favicon: parsed.favicon || urlInput.dataset.favicon || fallbackFavicon(parsed.siteUrl || url),
+                favicon: faviconInfo.favicon || fallbackFavicon(parsed.siteUrl || url),
+                faviconTriedAt: faviconInfo.attempted ? faviconInfo.triedAt : undefined,
                 sortOrder: this.storage.getSubs().length, createdAt: Date.now(), updatedAt: Date.now(),
             };
             const saved = await this.storage.upsertSub(s);
@@ -587,7 +593,12 @@ class Sidebar {
                 feed.status = "valid";
                 feed.parsedTitle = parsed.title || feed.title;
                 feed.siteUrl = parsed.siteUrl;
-                feed.favicon = parsed.favicon || fallbackFavicon(parsed.siteUrl || feed.url);
+                const faviconInfo = await resolveSubscriptionFavicon({
+                    feedFavicon: parsed.favicon,
+                    siteUrl: parsed.siteUrl || feed.url,
+                    always: true,
+                });
+                feed.favicon = faviconInfo.favicon || fallbackFavicon(parsed.siteUrl || feed.url);
                 feed.description = parsed.description;
                 feed.articleCount = parsed.articles.length;
                 feed.message = undefined;
@@ -712,6 +723,7 @@ class Sidebar {
                     categoryName: f.category,
                     enabled: true, errorCount: 0,
                     favicon: f.favicon || fallbackFavicon(f.url),
+                    faviconTriedAt: Date.now(),
                     siteUrl: f.siteUrl,
                     description: f.description,
                     sortOrder: this.storage.getSubs().length + importedSubs.length,
@@ -770,9 +782,14 @@ class Sidebar {
                     el("div", { class: "ar-featured__name" }, [f.name]),
                     el("div", { class: "ar-featured__url" }, [f.url]),
                     button({ text: "添加", size: "xs", variant: "primary", onclick: async () => {
+                        const faviconInfo = await resolveSubscriptionFavicon({
+                            siteUrl: f.url,
+                            always: true,
+                        });
                         const s: Subscription = {
                             id: genId("sub_"), url: f.url, name: f.name, enabled: true, errorCount: 0,
-                            favicon: fallbackFavicon(f.url),
+                            favicon: faviconInfo.favicon || fallbackFavicon(f.url),
+                            faviconTriedAt: faviconInfo.attempted ? faviconInfo.triedAt : undefined,
                             sortOrder: this.storage.getSubs().length, createdAt: Date.now(), updatedAt: Date.now(),
                         };
                         await this.storage.upsertSub(s);
@@ -2209,14 +2226,26 @@ export class RssTab {
                     pubDate: a.pubDate, fetchedAt: Date.now(),
                     content: a.content, description: a.description, thumbnail: a.thumbnail,
                 }));
-                await this.storage.patchSubMeta(sub.id, {
+                const faviconInfo = await resolveSubscriptionFavicon({
+                    feedFavicon: f.favicon,
+                    existingFavicon: sub.favicon,
+                    existingTriedAt: sub.faviconTriedAt,
+                    siteUrl: f.siteUrl || sub.siteUrl || sub.url,
+                });
+                const faviconPatch: Partial<Subscription> = {
                     siteUrl: f.siteUrl || sub.siteUrl,
                     description: f.description || sub.description,
-                    favicon: f.favicon || sub.favicon || fallbackFavicon(f.siteUrl || sub.url),
                     lastFetchAt: Date.now(),
                     lastError: undefined,
                     errorCount: 0,
-                });
+                };
+                if (faviconInfo.favicon || !sub.favicon) {
+                    faviconPatch.favicon = faviconInfo.favicon || fallbackFavicon(f.siteUrl || sub.url);
+                }
+                if (faviconInfo.attempted) {
+                    faviconPatch.faviconTriedAt = faviconInfo.triedAt;
+                }
+                await this.storage.patchSubMeta(sub.id, faviconPatch);
                 await this.storage.upsertArticles(articles as any);
             } catch (e) {
                 const latest = this.storage.getSub(sub.id);

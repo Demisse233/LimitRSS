@@ -197,3 +197,137 @@ export async function fetchAndParse(url: string, rsshubBaseUrl?: string): Promis
     const xml = await fetchXML(requestUrl);
     return parseXML(xml, requestUrl);
 }
+
+// =============== 站点 favicon 兜底 ===============
+
+/** 距离上次尝试超过此值才重新尝试抓站点 favicon，避免每次刷新都打主页 */
+export const FAVICON_BACKOFF_MS = 7 * 86400 * 1000;
+
+interface FaviconResolveOpts {
+    /** 这次 fetchAndParse 在 feed 里读到的 favicon（最高优先级） */
+    feedFavicon?: string;
+    /** 库里之前保存过的 favicon（次高优先级） */
+    existingFavicon?: string;
+    /** 库里上次尝试站点 favicon 的时间戳 */
+    existingTriedAt?: number;
+    /** 站点主域 URL，用于拉首页 HTML */
+    siteUrl?: string;
+    /** 新订阅路径，加订阅瞬间就需要抓，跳过 7 天退避 */
+    always?: boolean;
+}
+
+/**
+ * 综合考虑：feed 自带 → 库内已有 → 7 天后从站点首页抓。
+ * 返回的 `triedAt` 总是最新的（即便本次没真去抓），方便调用方只 patch 这个字段。
+ */
+export async function resolveSubscriptionFavicon(opts: FaviconResolveOpts): Promise<{ favicon?: string; triedAt: number; attempted: boolean }> {
+    if (opts.feedFavicon) return { favicon: opts.feedFavicon, triedAt: Date.now(), attempted: false };
+    if (opts.existingFavicon) return { favicon: opts.existingFavicon, triedAt: Date.now(), attempted: false };
+    const now = Date.now();
+    const sinceLast = now - (opts.existingTriedAt || 0);
+    if (!opts.always && opts.existingTriedAt && sinceLast < FAVICON_BACKOFF_MS) {
+        return { triedAt: opts.existingTriedAt, attempted: false };
+    }
+    if (!opts.siteUrl) return { triedAt: now, attempted: false };
+    const found = await fetchSiteFavicon(opts.siteUrl);
+    return { favicon: found, triedAt: now, attempted: true };
+}
+
+/**
+ * 抓站点首页 HTML，从 `<link rel="icon">` 系列标签里挑出最合适的图标；
+ * 抓不到 HTML 或 HTML 里没有 icon 标签时，兜底返回 `${origin}/favicon.ico`。
+ * 这里**不做**网络文件读取——只返回 URL，是否能 200 由 UI 的 `<img>` 处理。
+ */
+export async function fetchSiteFavicon(siteUrl: string): Promise<string | undefined> {
+    if (!siteUrl) return undefined;
+    let origin = "";
+    try {
+        const u = new URL(siteUrl);
+        if (u.protocol !== "http:" && u.protocol !== "https:") return undefined;
+        origin = u.origin;
+    } catch { return undefined; }
+
+    const html = await fetchSiteHomeHtml(origin + "/");
+    if (html) {
+        try {
+            const doc = new DOMParser().parseFromString(html, "text/html");
+            const picked = pickIconFromHtml(doc, origin + "/");
+            if (picked) return picked;
+        } catch { /* fall through */ }
+    }
+    // 兜底：直接走 /favicon.ico 的 URL；能不能 200 由 `<img>` 处理
+    return `${origin}/favicon.ico`;
+}
+
+async function fetchSiteHomeHtml(homeUrl: string): Promise<string | undefined> {
+    // 浏览器 fetch（5 秒超时，多数 favicon 链接查得很快）
+    try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5_000);
+        const r = await fetch(homeUrl, {
+            method: "GET",
+            signal: controller.signal,
+            headers: {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            },
+        });
+        clearTimeout(timer);
+        if (r.ok) {
+            const ct = r.headers.get("content-type") || "";
+            if (ct.includes("text/html") || ct.includes("application/xhtml")) {
+                return await r.text();
+            }
+        }
+    } catch { /* fall through to proxy */ }
+    // 思源内核 forwardProxy 兜底（解决 CORS / 反爬拦截）
+    try {
+        const { fetchSyncPost } = await import("siyuan");
+        const r: any = await fetchSyncPost("/api/network/forwardProxy", {
+            url: homeUrl, method: "GET", timeout: 15000,
+            headers: { "User-Agent": "Mozilla/5.0 (compatible; SiYuan-AI-RSS/0.1)" },
+        });
+        if (r?.code === 0 && r?.data?.body) {
+            const status = Number(r.data.status) || 0;
+            const ct = (r.data.headers?.["content-type"] || r.data.headers?.["Content-Type"] || "").toLowerCase();
+            if (status >= 200 && status < 400 && (ct.includes("text/html") || ct.includes("application/xhtml"))) {
+                return r.data.body as string;
+            }
+        }
+    } catch { /* ignore */ }
+    return undefined;
+}
+
+function pickIconFromHtml(doc: Document, baseUrl: string): string | undefined {
+    const links = Array.from(doc.querySelectorAll('link[rel]'));
+    type Cand = { href: string; pri: number };
+    const cands: Cand[] = [];
+    for (const l of links) {
+        const href = l.getAttribute("href");
+        if (!href) continue;
+        const rel = (l.getAttribute("rel") || "").toLowerCase();
+        if (!rel.includes("icon") && !rel.includes("mask-icon")) continue;
+        let pri = 0;
+        if (rel.includes("apple-touch-icon-precomposed")) pri = 5;
+        else if (rel.includes("apple-touch-icon")) pri = 4;
+        else if (rel.includes("mask-icon")) pri = 3;
+        else if (rel.includes("shortcut")) pri = 2;
+        else if (rel.includes("icon")) pri = 1;
+        const sizes = (l.getAttribute("sizes") || "").toLowerCase();
+        if (sizes && !sizes.includes("any")) {
+            const m = sizes.match(/(\d+)\s*x\s*(\d+)/);
+            if (m) {
+                const max = Math.max(parseInt(m[1], 10), parseInt(m[2], 10));
+                if (max >= 180) pri += 2;
+                else if (max >= 64) pri += 1;
+            }
+        } else if (sizes.includes("any")) {
+            pri += 1;
+        }
+        cands.push({ href, pri });
+    }
+    if (!cands.length) return undefined;
+    cands.sort((a, b) => b.pri - a.pri);
+    return resolveUrl(cands[0].href, baseUrl);
+}

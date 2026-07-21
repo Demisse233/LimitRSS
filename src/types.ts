@@ -10,6 +10,8 @@ export interface Category {
 export interface Subscription {
     id: ID; url: string; name: string; categoryId?: ID; categoryName?: string;
     siteUrl?: string; description?: string; favicon?: string;
+    /** 上次尝试自动抓站点 favicon 的时间戳，用于 7 天退避 */
+    faviconTriedAt?: number;
     enabled: boolean; errorCount: number; sortOrder: number;
     lastFetchAt?: number; lastError?: string;
     createdAt: number; updatedAt: number;
