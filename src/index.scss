@@ -953,6 +953,30 @@ select.ar-input {
 .ar-form__label { font-size: 12px; font-weight: 500; color: var(--ar-text-secondary); }
 .ar-form__hint { font-size: 11px; color: var(--ar-text-tertiary); }
 .ar-form__opts { display: flex; flex-direction: column; gap: 4px; }
+.ar-add-preview { margin-top: 4px; }
+.ar-add-preview__row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 32px;
+    padding: 4px 0;
+}
+.ar-add-preview__icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    background: var(--ar-bg-secondary);
+    object-fit: contain;
+    flex-shrink: 0;
+    border: 1px solid var(--ar-border, transparent);
+}
+.ar-add-preview__url {
+    font-size: 11px;
+    color: var(--ar-text-tertiary);
+    word-break: break-all;
+    line-height: 1.4;
+    font-family: var(--b3-font-family-code);
+}
 .ar-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
 .ar-check input { accent-color: var(--ar-accent); }
 .ar-switch { position: relative; display: inline-flex; align-items: center; width: 34px; height: 20px; flex-shrink: 0; cursor: pointer; }

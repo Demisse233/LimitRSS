@@ -453,19 +453,48 @@ class Sidebar {
         const urlInput = el("input", { class: "ar-input", type: "text", placeholder: "https://example.com/feed 或 rsshub://github/trending/weekly/any", spellcheck: "false" }) as HTMLInputElement;
         const nameInput = el("input", { class: "ar-input", type: "text", placeholder: "显示名称（可选）" }) as HTMLInputElement;
         const resultEl = el("div", { class: "ar-form__hint" });
+        const previewIcon = el("img", { class: "ar-add-preview__icon", alt: "" }) as HTMLImageElement;
+        previewIcon.style.display = "none";
+        const previewUrl = el("span", { class: "ar-add-preview__url" }, ["(尚未测试)"]);
+        previewIcon.addEventListener("error", () => {
+            previewIcon.style.display = "none";
+            previewUrl.textContent = `(图标加载失败：${previewIcon.src})`;
+        });
+        const previewRow = el("div", { class: "ar-form__row ar-add-preview" }, [
+            el("label", { class: "ar-form__label" }, ["图标预览"]),
+            el("div", { class: "ar-add-preview__row" }, [previewIcon, previewUrl]),
+        ]);
         const test = async () => {
             const url = urlInput.value.trim();
             if (!url) return toast("请先填写 URL", "warn");
             resultEl.textContent = "抓取中…";
+            previewIcon.style.display = "none";
+            previewUrl.textContent = "(解析中…)";
             try {
                 const f = await fetchAndParse(url, this.storage.getSettings().general.rsshubBaseUrl);
                 if (!nameInput.value) nameInput.value = f.title;
-                if (f.favicon) urlInput.dataset.favicon = f.favicon;
                 if (f.siteUrl) urlInput.dataset.siteUrl = f.siteUrl;
                 if (f.description) urlInput.dataset.description = f.description;
                 resultEl.textContent = `✓ 抓取成功：${f.title}（${f.articles.length} 篇）`;
+                // 异步解析图标，让用户立刻看到抓取结果；icon 解析完后回填预览
+                const faviconInfo = await resolveSubscriptionFavicon({
+                    feedFavicon: f.favicon,
+                    siteUrl: f.siteUrl || urlInput.dataset.siteUrl || url,
+                    always: true,
+                });
+                if (faviconInfo.favicon) {
+                    previewIcon.src = faviconInfo.favicon;
+                    previewIcon.style.display = "";
+                    previewUrl.textContent = faviconInfo.favicon;
+                    urlInput.dataset.favicon = faviconInfo.favicon;
+                } else {
+                    previewIcon.style.display = "none";
+                    previewUrl.textContent = "(feed 与站点首页都没找到图标，将用 /favicon.ico 兜底)";
+                }
             } catch (e) {
                 resultEl.textContent = `抓取失败：${(e as Error).message}`;
+                previewIcon.style.display = "none";
+                previewUrl.textContent = "(抓取失败，未获取到图标)";
             }
         };
         urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") test(); });
@@ -507,6 +536,7 @@ class Sidebar {
                 el("div", { class: "ar-form__hint" }, ["支持普通 RSS / Atom 地址，以及 Folo 使用的 rsshub:// 路由格式。"]),
                 el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["显示名称"]), nameInput]),
                 resultEl,
+                previewRow,
             ]),
             footer: [
                 button({ text: "取消", variant: "ghost", onclick: () => dialog.close() }),
