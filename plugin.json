@@ -2,10 +2,10 @@
   "name": "LimitRSS",
   "author": "demisse",
   "url": "https://github.com/Demisse233/LimitRSS",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "3.7.0",
-  "backends": ["windows", "linux", "darwin", "docker", "android", "ios", "harmony", "all"],
-  "frontends": ["desktop", "mobile", "browser-desktop", "browser-mobile", "desktop-window", "all"],
+  "backends": ["all"],
+  "frontends": ["all"],
   "disabledInPublish": false,
   "displayName": {
     "default": "LimitRSS",
