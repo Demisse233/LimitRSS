@@ -231,13 +231,14 @@ export async function resolveSubscriptionFavicon(opts: FaviconResolveOpts): Prom
     if (opts.feedFavicon) {
         const ok = await probeImageUrl(opts.feedFavicon);
         if (ok) return { favicon: opts.feedFavicon, triedAt: now, attempted: true };
-        // feed 自报的门牌号是坏的，不返回它；让后面的 fallback 去抓首页
+        // 探测失败 → 必须强制 HTML scrape 自愈，不能被 7 天退避卡住（否则用户刷新后图标消失，需要手动删除重加才能修）
     }
     if (opts.existingFavicon && opts.existingFavicon !== opts.feedFavicon) {
         return { favicon: opts.existingFavicon, triedAt: opts.existingTriedAt || now, attempted: false };
     }
     const sinceLast = now - (opts.existingTriedAt || 0);
-    if (!opts.always && opts.existingTriedAt && sinceLast < FAVICON_BACKOFF_MS) {
+    if (!opts.always && opts.existingTriedAt && sinceLast < FAVICON_BACKOFF_MS && !opts.feedFavicon) {
+        // 退避仅当没探测过 feedFavicon 时生效；探测失败时强制走 HTML scrape
         return { triedAt: opts.existingTriedAt, attempted: false };
     }
     if (!opts.siteUrl) return { triedAt: now, attempted: false };
@@ -267,7 +268,11 @@ async function probeImageUrl(url: string): Promise<boolean> {
             },
         });
         clearTimeout(timer);
-        if ((r.ok || r.status === 206) && /^image\//i.test(r.headers.get("content-type") || "")) {
+        if (r.ok || r.status === 206) {
+            const ct = (r.headers.get("content-type") || "").toLowerCase();
+            if (!/^image\//.test(ct)) return false;  // Content-Type 不是图片，先否决
+            const buf = new Uint8Array(await r.arrayBuffer());
+            if (!looksLikeImage(buf)) return false;  // 但凡 magic byte 不对，也否决
             return true;
         }
     } catch { /* 走下方 forwardProxy 兜底 */ }
@@ -282,10 +287,39 @@ async function probeImageUrl(url: string): Promise<boolean> {
             const status = Number(r.data.status) || 0;
             if (status >= 200 && status < 400) {
                 const ct = (r.data.headers?.["content-type"] || r.data.headers?.["Content-Type"] || "").toLowerCase();
-                if (/^image\//.test(ct)) return true;
+                if (!/^image\//.test(ct)) return false;
+                // forwardProxy body 是 string，可能是 base64 或原始二进制串
+                // 我们只看前几个字节；如果 content-length 已知且 body 长度合理
+                const body = r.data.body;
+                if (typeof body !== "string" || body.length < 4) return false;
+                return looksLikeImage(new TextEncoder().encode(body.slice(0, 32)));
             }
         }
     } catch { /* ignore */ }
+    return false;
+}
+
+/** 通过 magic bytes 判断一段字节流是不是合法图片 */
+function looksLikeImage(buf: Uint8Array): boolean {
+    if (!buf || buf.length < 4) return false;
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return true;
+    // JPEG: FF D8 FF
+    if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return true;
+    // GIF87a / GIF89a: 47 49 46 38 [37|39] 61
+    if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38 &&
+        (buf[4] === 0x37 || buf[4] === 0x39) && buf[5] === 0x61) return true;
+    // WebP: RIFF....WEBP (头 4 字节 RIFF, 8-11 字节 WEBP)
+    if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+        buf.length >= 12 && buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return true;
+    // ICO: 00 00 01 00
+    if (buf[0] === 0x00 && buf[1] === 0x00 && buf[2] === 0x01 && buf[3] === 0x00) return true;
+    // AVIF / HEIC: 没特定 magic，以 ftyp 开头也行
+    // SVG: '<svg' 或 '<?xml'
+    if (buf[0] === 0x3C) {
+        const head = new TextDecoder().decode(buf.slice(0, Math.min(buf.length, 32))).toLowerCase();
+        if (head.startsWith("<svg") || head.startsWith("<?xml")) return true;
+    }
     return false;
 }
 
