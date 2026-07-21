@@ -217,13 +217,25 @@ interface FaviconResolveOpts {
 }
 
 /**
- * 综合考虑：feed 自带 → 库内已有 → 7 天后从站点首页抓。
- * 返回的 `triedAt` 总是最新的（即便本次没真去抓），方便调用方只 patch 这个字段。
+ * 综合考虑：
+ *   1. feed 自报 → 用 Range GET 探一下，确认是合法图片（2xx + image/*）
+ *      否则视为无效，让下一步补救
+ *   2. 库内已存的（且不等于 feed 自报的）→ 直接信任
+ *   3. 7 天退避后从站点首页抓
+ *
+ * 返回的 `triedAt` 是本次"做过的网络动作"的时间戳，方便调用方只 patch 这个字段。
+ * `attempted: true` 表示这次跑了 Range 探活 或 HTML 抓取，对应回写 `faviconTriedAt`。
  */
 export async function resolveSubscriptionFavicon(opts: FaviconResolveOpts): Promise<{ favicon?: string; triedAt: number; attempted: boolean }> {
-    if (opts.feedFavicon) return { favicon: opts.feedFavicon, triedAt: Date.now(), attempted: false };
-    if (opts.existingFavicon) return { favicon: opts.existingFavicon, triedAt: Date.now(), attempted: false };
     const now = Date.now();
+    if (opts.feedFavicon) {
+        const ok = await probeImageUrl(opts.feedFavicon);
+        if (ok) return { favicon: opts.feedFavicon, triedAt: now, attempted: true };
+        // feed 自报的门牌号是坏的，不返回它；让后面的 fallback 去抓首页
+    }
+    if (opts.existingFavicon && opts.existingFavicon !== opts.feedFavicon) {
+        return { favicon: opts.existingFavicon, triedAt: opts.existingTriedAt || now, attempted: false };
+    }
     const sinceLast = now - (opts.existingTriedAt || 0);
     if (!opts.always && opts.existingTriedAt && sinceLast < FAVICON_BACKOFF_MS) {
         return { triedAt: opts.existingTriedAt, attempted: false };
@@ -231,6 +243,50 @@ export async function resolveSubscriptionFavicon(opts: FaviconResolveOpts): Prom
     if (!opts.siteUrl) return { triedAt: now, attempted: false };
     const found = await fetchSiteFavicon(opts.siteUrl);
     return { favicon: found, triedAt: now, attempted: true };
+}
+
+/**
+ * 用 Range GET 探一下 URL 是否真的能返回合法图片：
+ *   - status 2xx 或 206
+ *   - Content-Type 以 image/ 开头
+ * 网络层沿用浏览器 fetch → siyuan forwardProxy 的双路径，避免 CORS / 反爬死锁。
+ * 浏览器会缓存 Range 响应，二次探活的实际成本接近 0。
+ */
+async function probeImageUrl(url: string): Promise<boolean> {
+    if (!url) return false;
+    // 浏览器 fetch
+    try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5_000);
+        const r = await fetch(url, {
+            method: "GET",
+            signal: controller.signal,
+            headers: {
+                "Range": "bytes=0-1023",
+                "Accept": "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.1",
+            },
+        });
+        clearTimeout(timer);
+        if ((r.ok || r.status === 206) && /^image\//i.test(r.headers.get("content-type") || "")) {
+            return true;
+        }
+    } catch { /* 走下方 forwardProxy 兜底 */ }
+    // 思源内核 forwardProxy 兜底
+    try {
+        const { fetchSyncPost } = await import("siyuan");
+        const r: any = await fetchSyncPost("/api/network/forwardProxy", {
+            url, method: "GET", timeout: 10_000,
+            headers: { Range: "bytes=0-1023" },
+        });
+        if (r?.code === 0 && r?.data) {
+            const status = Number(r.data.status) || 0;
+            if (status >= 200 && status < 400) {
+                const ct = (r.data.headers?.["content-type"] || r.data.headers?.["Content-Type"] || "").toLowerCase();
+                if (/^image\//.test(ct)) return true;
+            }
+        }
+    } catch { /* ignore */ }
+    return false;
 }
 
 /**
