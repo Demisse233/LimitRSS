@@ -94,6 +94,7 @@ export function toast(msg: string, type: "info" | "success" | "error" | "warn" =
 export interface ModalOpt {
     title?: string;
     width?: string;
+    dialogClassName?: string;
     content: HTMLElement;
     onClose?: () => void;
     footer?: (HTMLElement | null)[];
@@ -104,7 +105,10 @@ export function modal(opt: ModalOpt): { close: () => void; setTitle: (t: string)
     const closeBtn = el("button", { class: "ar-modal__close", title: "关闭", onclick: () => close() }, ["×"]);
     const header = el("div", { class: "ar-modal__header" }, [titleEl, closeBtn]);
     const body = el("div", { class: "ar-modal__body" }, [opt.content]);
-    const dialog = el("div", { class: "ar-modal__dialog", style: { width: opt.width, maxWidth: opt.width || "560px" } }, [header, body]);
+    const dialog = el("div", {
+        class: `ar-modal__dialog ${opt.dialogClassName || ""}`.trim(),
+        style: { width: opt.width, maxWidth: opt.width || "560px" },
+    }, [header, body]);
     if (opt.footer && opt.footer.length) {
         const f = el("div", { class: "ar-modal__footer" });
         for (const x of opt.footer) if (x) f.appendChild(x);

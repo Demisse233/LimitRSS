@@ -3,7 +3,7 @@
  * 这是最核心的文件
  */
 
-import { el, clear, on, debounce, escapeHtml, iconLabel } from "./ui";
+import { el, clear, on, escapeHtml, iconLabel } from "./ui";
 import { icon as makeIcon } from "./icons";
 import { button, dropdown, DropdownItem, toast, modal, empty, spinner } from "./components";
 import { Storage } from "./storage";
@@ -1065,6 +1065,10 @@ class ArticleListView {
     activeArticleId: string | null = null;
     private listScrollTop = 0;
     private centerArticleId: string | null = null;
+    private searchComposing = false;
+    private searchTimer: ReturnType<typeof setTimeout> | null = null;
+    private pendingRenderAfterComposition = false;
+    private restoreSearchFocus = false;
     onOpen: (id: string) => void;
     onDaily: (date: string) => void;
     onGenerateDaily: (date: string) => void;
@@ -1216,6 +1220,10 @@ class ArticleListView {
     }
 
     render() {
+        if (this.searchComposing) {
+            this.pendingRenderAfterComposition = true;
+            return;
+        }
         const oldList = this.root.querySelector<HTMLElement>(".ar-list__items");
         if (oldList) this.listScrollTop = oldList.scrollTop;
         clear(this.root);
@@ -1230,8 +1238,35 @@ class ArticleListView {
         // 头部
         const title = this.getHeaderTitle();
         const search = el("input", { class: "ar-input ar-list__search", type: "search", placeholder: "搜索文章标题、作者、内容…", value: this.search }) as HTMLInputElement;
-        const onSearch = debounce(() => { this.search = search.value.trim(); this.visibleCount = 30; this.render(); }, 200);
-        search.addEventListener("input", onSearch);
+        const scheduleSearch = () => {
+            if (this.searchTimer) clearTimeout(this.searchTimer);
+            this.searchTimer = setTimeout(() => {
+                this.searchTimer = null;
+                const nextSearch = search.value.trim();
+                const needsRender = this.pendingRenderAfterComposition || nextSearch !== this.search;
+                this.pendingRenderAfterComposition = false;
+                if (!needsRender) return;
+                this.search = nextSearch;
+                this.visibleCount = 30;
+                this.restoreSearchFocus = document.activeElement === search;
+                this.render();
+            }, 250);
+        };
+        search.addEventListener("compositionstart", () => {
+            this.searchComposing = true;
+            if (this.searchTimer) {
+                clearTimeout(this.searchTimer);
+                this.searchTimer = null;
+            }
+        });
+        search.addEventListener("compositionend", () => {
+            this.searchComposing = false;
+            scheduleSearch();
+        });
+        search.addEventListener("input", (event) => {
+            if (this.searchComposing || (event as InputEvent).isComposing) return;
+            scheduleSearch();
+        });
 
         const filterChips = el("div", { class: "ar-list__filters" });
         const showFilters = this.active !== "unread" && this.active !== "starred";
@@ -1260,6 +1295,14 @@ class ArticleListView {
         const toolbar = el("div", { class: "ar-list__toolbar" }, showFilters ? [search, filterChips] : [search]);
         this.root.appendChild(header);
         this.root.appendChild(toolbar);
+        if (this.restoreSearchFocus) {
+            this.restoreSearchFocus = false;
+            requestAnimationFrame(() => {
+                if (!search.isConnected) return;
+                search.focus({ preventScroll: true });
+                search.setSelectionRange(search.value.length, search.value.length);
+            });
+        }
 
         if (articles.length === 0) {
             this.root.appendChild(empty("mailOpen", "暂无文章", "在侧栏添加一个订阅源试试"));
@@ -1372,6 +1415,7 @@ class Reader {
     private boundarySwitchAt = 0;
     private switchHintTimer: number | null = null;
     private switchArmed: { direction: "prev" | "next"; articleId: string; expiresAt: number; distance: number; lastWheelAt: number } | null = null;
+    private renderedArticleSignature = "";
 
     constructor(root: HTMLElement, storage: Storage, ai: AIService, onOpenArticle: (id: string) => void, onNavigateArticle: (currentId: string, direction: "prev" | "next") => void, getAdjacentArticle: (currentId: string, direction: "prev" | "next") => Article | null) {
         this.root = root;
@@ -1380,8 +1424,40 @@ class Reader {
         this.onOpenArticle = onOpenArticle;
         this.onNavigateArticle = onNavigateArticle;
         this.getAdjacentArticle = getAdjacentArticle;
-        storage.on(() => this.render());
+        storage.on(() => this.handleStorageChange());
         this.render();
+    }
+
+    private articleSignature(article: Article, sub?: Subscription) {
+        return JSON.stringify([
+            article.id,
+            article.title,
+            article.author,
+            article.pubDate,
+            article.content,
+            article.description,
+            article.thumbnail,
+            article.fullText,
+            article.fullTextState,
+            article.isRead,
+            article.isStarred,
+            article.savedDocId,
+            sub?.name,
+        ]);
+    }
+
+    private handleStorageChange() {
+        if (this.mode !== "article" || !this.current) return;
+        const latest = this.storage.getArticle(this.current.id);
+        if (!latest) {
+            this.current = null;
+            this.render();
+            return;
+        }
+        const signature = this.articleSignature(latest, this.storage.getSub(latest.subscriptionId));
+        this.current = latest;
+        if (signature === this.renderedArticleSignature) return;
+        this.render({ preserveScroll: true });
     }
 
     showArticle(a: Article | null) {
@@ -1410,19 +1486,25 @@ class Reader {
         this.render();
     }
 
-    render() {
+    render(options: { preserveScroll?: boolean } = {}) {
+        const articleId = this.current?.id;
+        const previousScrollTop = options.preserveScroll ? this.contentArea?.scrollTop || 0 : 0;
         clear(this.root);
+        this.contentArea = null;
         if (this.mode === "daily") {
+            this.renderedArticleSignature = "";
             this.renderDaily();
             return;
         }
         if (!this.current) {
+            this.renderedArticleSignature = "";
             this.root.appendChild(empty("article", "选择一篇文章开始阅读", "点击左侧列表的文章"));
             return;
         }
         const a = this.current;
         const sub = this.storage.getSub(a.subscriptionId);
         const settings = this.storage.getSettings();
+        this.renderedArticleSignature = this.articleSignature(a, sub);
 
         // 顶部
         const topBar = el("div", { class: "ar-rd__topbar" }, [
@@ -1463,6 +1545,15 @@ class Reader {
             this.root.appendChild(prevHint);
             this.root.appendChild(nextHint);
             this.bindBoundarySwitch(this.contentArea, a.id, prevHint, nextHint, !!prevArticle, !!nextArticle);
+        }
+        if (options.preserveScroll && previousScrollTop > 0) {
+            const restore = () => {
+                if (this.current?.id !== articleId || !this.contentArea) return;
+                this.contentArea.scrollTop = previousScrollTop;
+            };
+            restore();
+            requestAnimationFrame(restore);
+            window.setTimeout(restore, 120);
         }
     }
 

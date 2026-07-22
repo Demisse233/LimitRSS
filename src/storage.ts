@@ -440,6 +440,8 @@ export class Storage {
                 a.savedDocId = ex.savedDocId; a.savedAt = ex.savedAt;
                 a.aiResults = a.aiResults || ex.aiResults;
                 a.highlights = a.highlights || ex.highlights;
+                a.fullText = a.fullText || ex.fullText;
+                a.fullTextState = a.fullTextState || ex.fullTextState;
             } else {
                 a.isRead = this.read.has(a.id);
                 a.isStarred = this.star.has(a.id);

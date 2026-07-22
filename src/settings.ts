@@ -50,6 +50,7 @@ export function openSettings(storage: Storage, ai: AIService) {
     const render = () => {
         clear(sidebar);
         clear(main);
+        main.classList.toggle("ar-settings__main--subscriptions", active === "subscriptions");
         SECTIONS.forEach((s) => {
             sidebar.appendChild(el("button", {
                 class: `ar-settings__nav-item ${s.id === active ? "ar-settings__nav-item--active" : ""}`,
@@ -113,6 +114,7 @@ export function openSettings(storage: Storage, ai: AIService) {
     dialog = modal({
         title: "LimitRSS 设置",
         width: "840px",
+        dialogClassName: "ar-modal__dialog--settings",
         content: root,
         footer: [button({ text: "关闭", variant: "primary", onclick: () => dialog.close() })],
     });
@@ -275,7 +277,7 @@ function renderSubscriptions(
         clear(main);
         renderSubscriptions(main, s, selected, validationResults, validating, onValidate, onDeleteInvalid);
     };
-    const wrap = el("div", { class: "ar-settings__section ar-settings__section--wide" });
+    const wrap = el("div", { class: "ar-settings__section ar-settings__section--wide ar-settings__section--subscriptions" });
     const subs = s.getSubs();
     const cats = s.getCats();
     const selectedCount = selected.size;
@@ -286,34 +288,41 @@ function renderSubscriptions(
     cats.filter((c) => c.id !== "c_default").forEach((c) => moveSelect.appendChild(el("option", { value: c.id }, [c.name])));
 
     wrap.appendChild(sectionTitle("订阅源"));
+    const selectAllButton = button({ text: "全选", size: "sm", variant: "secondary", disabled: subs.length === 0, onclick: () => {
+        subs.forEach((sub) => selected.add(sub.id));
+        rerender();
+    } });
+    const clearButton = button({ text: "清空", size: "sm", variant: "ghost", disabled: selectedCount === 0, onclick: () => {
+        selected.clear();
+        rerender();
+    } });
+    const moveButton = button({ text: "移动", size: "sm", variant: "secondary", disabled: selectedCount === 0, onclick: async () => {
+        const ids = Array.from(selected);
+        await s.moveSubs(ids, moveSelect.value || undefined);
+        selected.clear();
+        rerender();
+        toast(`已移动 ${ids.length} 个订阅源`, "success");
+    } });
+    const deleteButton = button({ text: "删除", size: "sm", variant: "ghost", danger: true, disabled: selectedCount === 0, onclick: async () => {
+        const ids = Array.from(selected);
+        if (!confirm(`删除选中的 ${ids.length} 个订阅源？对应文章也会一并移除。`)) return;
+        await s.removeSubs(ids);
+        selected.clear();
+        rerender();
+        toast(`已删除 ${ids.length} 个订阅源`, "success");
+    } });
+    const validateButton = button({ text: validating ? "检测中…" : "检测失效源", size: "sm", variant: "secondary", disabled: validating || subs.length === 0, onclick: () => onValidate() });
+    const deleteInvalidButton = button({ text: `删除失效${invalidCount ? ` ${invalidCount}` : ""}`, size: "sm", variant: "ghost", danger: true, disabled: invalidCount === 0 || validating, onclick: () => onDeleteInvalid() });
+
     wrap.appendChild(el("div", { class: "ar-sub-manage__bar" }, [
-        el("div", { class: "ar-sub-manage__summary" }, [selectedLabel]),
-        button({ text: "全选", size: "sm", variant: "secondary", disabled: subs.length === 0, onclick: () => {
-            subs.forEach((sub) => selected.add(sub.id));
-            rerender();
-        } }),
-        button({ text: "清空", size: "sm", variant: "ghost", disabled: selectedCount === 0, onclick: () => {
-            selected.clear();
-            rerender();
-        } }),
-        moveSelect,
-        button({ text: "移动", size: "sm", variant: "secondary", disabled: selectedCount === 0, onclick: async () => {
-            const ids = Array.from(selected);
-            await s.moveSubs(ids, moveSelect.value || undefined);
-            selected.clear();
-            rerender();
-            toast(`已移动 ${ids.length} 个订阅源`, "success");
-        } }),
-        button({ text: "删除", size: "sm", variant: "ghost", danger: true, disabled: selectedCount === 0, onclick: async () => {
-            const ids = Array.from(selected);
-            if (!confirm(`删除选中的 ${ids.length} 个订阅源？对应文章也会一并移除。`)) return;
-            await s.removeSubs(ids);
-            selected.clear();
-            rerender();
-            toast(`已删除 ${ids.length} 个订阅源`, "success");
-        } }),
-        button({ text: validating ? "检测中…" : "检测失效源", size: "sm", variant: "secondary", disabled: validating || subs.length === 0, onclick: () => onValidate() }),
-        button({ text: `删除失效${invalidCount ? ` ${invalidCount}` : ""}`, size: "sm", variant: "ghost", danger: true, disabled: invalidCount === 0 || validating, onclick: () => onDeleteInvalid() }),
+        el("div", { class: "ar-sub-manage__bar-head" }, [
+            el("div", { class: "ar-sub-manage__summary" }, [selectedLabel]),
+            el("div", { class: "ar-sub-manage__selection-actions" }, [selectAllButton, clearButton]),
+        ]),
+        el("div", { class: "ar-sub-manage__bar-actions" }, [
+            el("div", { class: "ar-sub-manage__batch-actions" }, [moveSelect, moveButton, deleteButton]),
+            el("div", { class: "ar-sub-manage__validation-actions" }, [validateButton, deleteInvalidButton]),
+        ]),
     ]));
 
     const groups = [
@@ -645,7 +654,7 @@ function renderAbout(main: HTMLElement) {
     wrap.appendChild(el("div", { class: "ar-about" }, [
         el("div", { class: "ar-about__logo" }, [makeIcon("rssMain", 48)]),
         el("h2", {}, ["LimitRSS"]),
-        el("p", { class: "ar-about__ver" }, ["v0.1.4 · 2026-07-21"]),
+        el("p", { class: "ar-about__ver" }, ["v0.1.5 · 2026-07-22"]),
         el("p", {}, ["用 AI 收敛信息噪音的 RSS 阅读器。"]),
         el("hr"),
         el("h3", {}, ["特性"]),

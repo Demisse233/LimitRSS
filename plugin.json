@@ -2,7 +2,7 @@
   "name": "LimitRSS",
   "author": "demisse",
   "url": "https://github.com/Demisse233/LimitRSS",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "minAppVersion": "3.7.0",
   "backends": ["all"],
   "frontends": ["all"],
