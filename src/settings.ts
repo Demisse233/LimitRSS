@@ -9,7 +9,7 @@ import { Storage } from "./storage";
 import { AIService } from "./ai";
 import { AIProvider, DEFAULT_PROMPTS, PromptTemplate, Subscription } from "./types";
 import { applyDisplaySettings } from "./theme";
-import { fetchAndParse } from "./fetcher";
+import { fetchAndParse, listRSSHubInstances, normalizeRSSHubBaseUrl } from "./fetcher";
 
 const GENERIC_PROVIDER = {
     endpoint: "https://api.openai.com/v1",
@@ -204,6 +204,56 @@ async function validateSubscription(sub: Subscription, rsshubBaseUrl?: string): 
     }
 }
 
+function escapeXmlAttribute(value: string): string {
+    return value
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+function subscriptionOutline(sub: Subscription, indent: string): string {
+    const attrs = [
+        `text="${escapeXmlAttribute(sub.name || sub.url)}"`,
+        `title="${escapeXmlAttribute(sub.name || sub.url)}"`,
+        'type="rss"',
+        `xmlUrl="${escapeXmlAttribute(sub.url)}"`,
+    ];
+    if (sub.siteUrl) attrs.push(`htmlUrl="${escapeXmlAttribute(sub.siteUrl)}"`);
+    if (sub.description) attrs.push(`description="${escapeXmlAttribute(sub.description)}"`);
+    return `${indent}<outline ${attrs.join(" ")} />`;
+}
+
+function exportSubscriptionsAsOpml(s: Storage) {
+    const subs = s.getSubs();
+    if (!subs.length) {
+        toast("暂无可导出的订阅源", "info");
+        return;
+    }
+    const lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<opml version="2.0">',
+        '  <head>',
+        '    <title>LimitRSS 订阅源</title>',
+        `    <dateCreated>${new Date().toUTCString()}</dateCreated>`,
+        '  </head>',
+        '  <body>',
+    ];
+    subs.forEach((sub) => lines.push(subscriptionOutline(sub, "    ")));
+    lines.push("  </body>", "</opml>", "");
+
+    const blob = new Blob([lines.join("\n")], { type: "text/x-opml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `LimitRSS-subscriptions-${new Date().toISOString().slice(0, 10)}.opml`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    toast(`已导出 ${subs.length} 个订阅源`, "success");
+}
+
 // =============== 各面板 ===============
 
 function renderGeneral(main: HTMLElement, s: Storage) {
@@ -220,8 +270,48 @@ function renderGeneral(main: HTMLElement, s: Storage) {
     ], (v) => updateGeneral({ language: v }))));
     wrap.appendChild(formRow("每页文章数", numberInput(settings.general.articlesPerPage, (v) => updateGeneral({ articlesPerPage: v }))));
     wrap.appendChild(formRow("自动刷新间隔（分钟，0=关）", numberInput(settings.general.autoRefresh, (v) => updateGeneral({ autoRefresh: v }))));
-    wrap.appendChild(formRow("RSSHub 实例地址", input(settings.general.rsshubBaseUrl || "https://rsshub.app", (v) => updateGeneral({ rsshubBaseUrl: v.trim() }))));
-    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["用于解析 rsshub:// 路由；可填写自建实例地址，默认使用 https://rsshub.app。"]));
+    const renderRSSHubInstances = () => {
+        clear(main);
+        renderGeneral(main, s);
+    };
+    const instanceList = el("div", { class: "ar-rsshub-settings" });
+    listRSSHubInstances(settings.general.rsshubBaseUrl, settings.general.rsshubCustomInstances || []).forEach((instance) => {
+        const radio = el("input", { type: "radio", name: "ar-rsshub-default", value: instance.url }) as HTMLInputElement;
+        radio.checked = normalizeRSSHubBaseUrl(settings.general.rsshubBaseUrl) === instance.url;
+        radio.addEventListener("change", () => updateGeneral({ rsshubBaseUrl: instance.url }));
+        instanceList.appendChild(el("label", { class: "ar-rsshub-settings__item" }, [
+            radio,
+            el("span", { class: "ar-rsshub-settings__main" }, [
+                el("span", { class: "ar-rsshub-settings__name" }, [instance.name]),
+                el("span", { class: "ar-rsshub-settings__url" }, [instance.url]),
+            ]),
+            instance.builtin ? el("span", { class: "ar-rsshub-settings__tag" }, ["内置"]) : button({
+                text: "移除", size: "xs", variant: "ghost", danger: true,
+                onclick: (event) => {
+                    event.preventDefault();
+                    const custom = (s.getSettings().general.rsshubCustomInstances || []).filter((url) => normalizeRSSHubBaseUrl(url) !== instance.url);
+                    const current = normalizeRSSHubBaseUrl(s.getSettings().general.rsshubBaseUrl);
+                    updateGeneral({ rsshubCustomInstances: custom, rsshubBaseUrl: current === instance.url ? "https://rsshub.app" : current });
+                    renderRSSHubInstances();
+                },
+            }),
+        ]));
+    });
+    const customInput = el("input", { class: "ar-input", type: "url", placeholder: "https://rsshub.example.com" }) as HTMLInputElement;
+    const addCustom = () => {
+        const url = normalizeRSSHubBaseUrl(customInput.value);
+        if (!/^https?:\/\//i.test(url)) return toast("实例地址必须以 http:// 或 https:// 开头", "warn");
+        const custom = Array.from(new Set([...(s.getSettings().general.rsshubCustomInstances || []).map(normalizeRSSHubBaseUrl), url]));
+        updateGeneral({ rsshubCustomInstances: custom, rsshubBaseUrl: url });
+        renderRSSHubInstances();
+    };
+    customInput.addEventListener("keydown", (event) => { if (event.key === "Enter") addCustom(); });
+    wrap.appendChild(formRow("RSSHub 默认实例", instanceList));
+    wrap.appendChild(el("div", { class: "ar-rsshub-settings__add" }, [
+        customInput,
+        button({ text: "添加实例", size: "sm", variant: "secondary", onclick: addCustom }),
+    ]));
+    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["添加 rsshub:// 订阅时会检测全部实例，并允许临时选择可用实例。公共实例由第三方维护，稳定性无法保证。"]));
     wrap.appendChild(formRow("自动清理旧文章（天，0=关）", numberInput(settings.general.articleRetentionDays ?? 7, (v) => {
         updateGeneral({ articleRetentionDays: Math.max(0, Math.round(v)) });
         s.cleanupExpiredArticles();
@@ -313,6 +403,7 @@ function renderSubscriptions(
     } });
     const validateButton = button({ text: validating ? "检测中…" : "检测失效源", size: "sm", variant: "secondary", disabled: validating || subs.length === 0, onclick: () => onValidate() });
     const deleteInvalidButton = button({ text: `删除失效${invalidCount ? ` ${invalidCount}` : ""}`, size: "sm", variant: "ghost", danger: true, disabled: invalidCount === 0 || validating, onclick: () => onDeleteInvalid() });
+    const exportOpmlButton = button({ text: "导出 OPML", size: "sm", variant: "secondary", disabled: subs.length === 0, onclick: () => exportSubscriptionsAsOpml(s) });
 
     wrap.appendChild(el("div", { class: "ar-sub-manage__bar" }, [
         el("div", { class: "ar-sub-manage__bar-head" }, [
@@ -321,7 +412,7 @@ function renderSubscriptions(
         ]),
         el("div", { class: "ar-sub-manage__bar-actions" }, [
             el("div", { class: "ar-sub-manage__batch-actions" }, [moveSelect, moveButton, deleteButton]),
-            el("div", { class: "ar-sub-manage__validation-actions" }, [validateButton, deleteInvalidButton]),
+            el("div", { class: "ar-sub-manage__validation-actions" }, [validateButton, deleteInvalidButton, exportOpmlButton]),
         ]),
     ]));
 
@@ -654,7 +745,7 @@ function renderAbout(main: HTMLElement) {
     wrap.appendChild(el("div", { class: "ar-about" }, [
         el("div", { class: "ar-about__logo" }, [makeIcon("rssMain", 48)]),
         el("h2", {}, ["LimitRSS"]),
-        el("p", { class: "ar-about__ver" }, ["v0.1.5 · 2026-07-22"]),
+        el("p", { class: "ar-about__ver" }, ["v0.1.6 · 2026-07-22"]),
         el("p", {}, ["用 AI 收敛信息噪音的 RSS 阅读器。"]),
         el("hr"),
         el("h3", {}, ["特性"]),

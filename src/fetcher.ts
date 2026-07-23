@@ -5,6 +5,27 @@
 const USER_AGENT = "Mozilla/5.0 (compatible; SiYuan-AI-RSS/0.1)";
 const DEFAULT_RSSHUB_BASE_URL = "https://rsshub.app";
 
+export const BUILTIN_RSSHUB_INSTANCES = [
+    { name: "RSSHub 官方", url: "https://rsshub.app" },
+    { name: "YFI 公共实例", url: "https://rsshub.yfi.moe" },
+    { name: "Bling 公共实例", url: "https://rsshub.bling.moe" },
+    { name: "Nyan 公共实例", url: "https://rsshub.nyan.im" },
+] as const;
+
+export function normalizeRSSHubBaseUrl(value: string): string {
+    return (value || "").trim().replace(/\/+$/, "");
+}
+
+export function listRSSHubInstances(current = "", custom: string[] = []): { name: string; url: string; builtin: boolean }[] {
+    const builtinUrls = new Set<string>(BUILTIN_RSSHUB_INSTANCES.map((item) => item.url));
+    const normalizedCustom = [current, ...custom].map(normalizeRSSHubBaseUrl)
+        .filter((url) => /^https?:\/\//i.test(url) && !builtinUrls.has(url));
+    return [
+        ...BUILTIN_RSSHUB_INSTANCES.map((item) => ({ ...item, builtin: true })),
+        ...Array.from(new Set(normalizedCustom)).map((url) => ({ name: "自定义实例", url, builtin: false })),
+    ];
+}
+
 export interface ParsedFeed {
     title: string;
     siteUrl?: string;
@@ -65,7 +86,7 @@ export function resolveFeedUrl(input: string, rsshubBaseUrl = DEFAULT_RSSHUB_BAS
     const route = url.replace(/^rsshub:\/\/+?/i, "").replace(/^\/+/, "");
     if (!route) throw new Error("RSSHub 路由不能为空");
 
-    const base = (rsshubBaseUrl || DEFAULT_RSSHUB_BASE_URL).trim().replace(/\/+$/, "");
+    const base = normalizeRSSHubBaseUrl(rsshubBaseUrl || DEFAULT_RSSHUB_BASE_URL);
     if (!/^https?:\/\//i.test(base)) throw new Error("RSSHub 实例地址必须以 http:// 或 https:// 开头");
     return `${base}/${route}`;
 }

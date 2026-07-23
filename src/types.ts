@@ -66,7 +66,7 @@ export interface AISettings {
 }
 
 export interface Settings {
-    general: { language: string; articlesPerPage: number; autoRefresh: number; fullText?: boolean; articleRetentionDays: number; rsshubBaseUrl: string; };
+    general: { language: string; articlesPerPage: number; autoRefresh: number; fullText?: boolean; articleRetentionDays: number; rsshubBaseUrl: string; rsshubCustomInstances?: string[]; };
     display: { fontSize: number; lineHeight: number; theme: string; };
     reading: { fadeReadArticles: boolean; boundaryScrollSwitch: boolean; boundaryConfirmDelayMs: number; boundaryCooldownMs: number; boundaryTriggerDistance: number; };
     save: { template: string; includeSourceLink: boolean; downloadImages: boolean; };

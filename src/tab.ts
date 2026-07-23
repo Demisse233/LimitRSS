@@ -3,13 +3,13 @@
  * 这是最核心的文件
  */
 
-import { el, clear, on, escapeHtml, iconLabel } from "./ui";
+import { el, clear, on, escapeHtml, iconLabel, debounce } from "./ui";
 import { icon as makeIcon } from "./icons";
 import { button, dropdown, DropdownItem, toast, modal, empty, spinner } from "./components";
 import { Storage } from "./storage";
 import { AIService } from "./ai";
 import { Article, Subscription, AIResult, FEATURED, FEATURED_CATS, PromptTemplate, Category } from "./types";
-import { fetchAndParse, resolveSubscriptionFavicon } from "./fetcher";
+import { fetchAndParse, resolveSubscriptionFavicon, listRSSHubInstances, normalizeRSSHubBaseUrl } from "./fetcher";
 import { fetchFullText } from "./fulltext";
 import { saveMarkdownToSiyuan, saveToSiyuan } from "./save";
 import { openSettings } from "./settings";
@@ -453,6 +453,73 @@ class Sidebar {
         const urlInput = el("input", { class: "ar-input", type: "text", placeholder: "https://example.com/feed 或 rsshub://github/trending/weekly/any", spellcheck: "false" }) as HTMLInputElement;
         const nameInput = el("input", { class: "ar-input", type: "text", placeholder: "显示名称（可选）" }) as HTMLInputElement;
         const resultEl = el("div", { class: "ar-form__hint" });
+        const rsshubPanel = el("div", { class: "ar-rsshub-picker" });
+        const instanceResults = new Map<string, { status: "testing" | "ok" | "error"; latency?: number; message?: string; feed?: Awaited<ReturnType<typeof fetchAndParse>> }>();
+        let selectedInstance = normalizeRSSHubBaseUrl(this.storage.getSettings().general.rsshubBaseUrl);
+        let instanceTestRun = 0;
+        const isRSSHubUrl = () => /^rsshub:\/\//i.test(urlInput.value.trim());
+        const instances = () => {
+            const general = this.storage.getSettings().general;
+            return listRSSHubInstances(general.rsshubBaseUrl, general.rsshubCustomInstances || []);
+        };
+        const renderInstancePicker = () => {
+            clear(rsshubPanel);
+            rsshubPanel.style.display = isRSSHubUrl() ? "" : "none";
+            if (!isRSSHubUrl()) return;
+            rsshubPanel.appendChild(el("div", { class: "ar-rsshub-picker__title" }, ["选择 RSSHub 实例"]));
+            instances().forEach((instance) => {
+                const state = instanceResults.get(instance.url);
+                const radio = el("input", { type: "radio", name: "ar-rsshub-instance", value: instance.url }) as HTMLInputElement;
+                radio.checked = selectedInstance === instance.url;
+                radio.addEventListener("change", () => { selectedInstance = instance.url; renderInstancePicker(); });
+                const status = state?.status === "testing" ? "检测中…"
+                    : state?.status === "ok" ? `可用 · ${state.latency}ms`
+                    : state?.status === "error" ? (state.message || "不可用") : "待检测";
+                rsshubPanel.appendChild(el("label", { class: `ar-rsshub-picker__item ar-rsshub-picker__item--${state?.status || "idle"}` }, [
+                    radio,
+                    el("span", { class: "ar-rsshub-picker__main" }, [
+                        el("span", { class: "ar-rsshub-picker__name" }, [
+                            instance.name,
+                            ...(instance.builtin ? [el("small", {}, ["内置"])] : []),
+                        ]),
+                        el("span", { class: "ar-rsshub-picker__url" }, [instance.url]),
+                    ]),
+                    el("span", { class: "ar-rsshub-picker__status" }, [status]),
+                ]));
+            });
+        };
+        const testRSSHubInstances = async () => {
+            if (!isRSSHubUrl()) return undefined;
+            const url = urlInput.value.trim();
+            const run = ++instanceTestRun;
+            const candidates = instances();
+            candidates.forEach((instance) => instanceResults.set(instance.url, { status: "testing" }));
+            renderInstancePicker();
+            await Promise.all(candidates.map(async (instance) => {
+                const started = performance.now();
+                try {
+                    const feed = await Promise.race([
+                        fetchAndParse(url, instance.url),
+                        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("超时")), 15_000)),
+                    ]);
+                    if (run !== instanceTestRun) return;
+                    instanceResults.set(instance.url, { status: "ok", latency: Math.round(performance.now() - started), feed });
+                } catch (error) {
+                    if (run !== instanceTestRun) return;
+                    const message = (error as Error).message.match(/HTTP \d+/)?.[0] || (error as Error).message.replace(/^Failed to fetch .*?: /, "");
+                    instanceResults.set(instance.url, { status: "error", message });
+                }
+                renderInstancePicker();
+            }));
+            if (run !== instanceTestRun) return undefined;
+            const selectedState = instanceResults.get(selectedInstance);
+            if (selectedState?.status !== "ok") {
+                const available = candidates.find((instance) => instanceResults.get(instance.url)?.status === "ok");
+                if (available) selectedInstance = available.url;
+            }
+            renderInstancePicker();
+            return instanceResults.get(selectedInstance)?.feed;
+        };
         const previewIcon = el("img", { class: "ar-add-preview__icon", alt: "" }) as HTMLImageElement;
         previewIcon.style.display = "none";
         const previewUrl = el("span", { class: "ar-add-preview__url" }, ["(尚未测试)"]);
@@ -471,7 +538,10 @@ class Sidebar {
             previewIcon.style.display = "none";
             previewUrl.textContent = "(解析中…)";
             try {
-                const f = await fetchAndParse(url, this.storage.getSettings().general.rsshubBaseUrl);
+                const f = isRSSHubUrl()
+                    ? await testRSSHubInstances()
+                    : await fetchAndParse(url, this.storage.getSettings().general.rsshubBaseUrl);
+                if (!f) throw new Error("没有可用的 RSSHub 实例，请在设置中添加自定义实例");
                 if (!nameInput.value) nameInput.value = f.title;
                 if (f.siteUrl) urlInput.dataset.siteUrl = f.siteUrl;
                 if (f.description) urlInput.dataset.description = f.description;
@@ -497,13 +567,30 @@ class Sidebar {
                 previewUrl.textContent = "(抓取失败，未获取到图标)";
             }
         };
+        const autoTestRSSHub = debounce(() => {
+            renderInstancePicker();
+            if (isRSSHubUrl()) test();
+        }, 650);
+        urlInput.addEventListener("input", () => {
+            instanceTestRun++;
+            instanceResults.clear();
+            renderInstancePicker();
+            if (isRSSHubUrl()) autoTestRSSHub();
+        });
         urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") test(); });
         const doSave = async () => {
             const url = urlInput.value.trim();
             if (!url) return toast("请填写 URL", "warn");
             let parsed: Awaited<ReturnType<typeof fetchAndParse>> | undefined;
             try {
-                parsed = await fetchAndParse(url, this.storage.getSettings().general.rsshubBaseUrl);
+                if (isRSSHubUrl()) {
+                    parsed = instanceResults.get(selectedInstance)?.feed || await testRSSHubInstances();
+                    if (!parsed) throw new Error("没有可用的 RSSHub 实例");
+                    const general = this.storage.getSettings().general;
+                    this.storage.updateSettings({ general: { ...general, rsshubBaseUrl: selectedInstance } });
+                } else {
+                    parsed = await fetchAndParse(url, this.storage.getSettings().general.rsshubBaseUrl);
+                }
             } catch (e) {
                 return toast("订阅源不可用：" + (e as Error).message, "error", 4000);
             }
@@ -534,6 +621,7 @@ class Sidebar {
             content: el("div", {}, [
                 el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["RSS / URL *"]), urlInput]),
                 el("div", { class: "ar-form__hint" }, ["支持普通 RSS / Atom 地址，以及 Folo 使用的 rsshub:// 路由格式。"]),
+                rsshubPanel,
                 el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["显示名称"]), nameInput]),
                 resultEl,
                 previewRow,
@@ -544,6 +632,7 @@ class Sidebar {
                 button({ text: "添加", variant: "primary", onclick: doSave }),
             ],
         });
+        renderInstancePicker();
     }
 
     showOPML() {
@@ -1305,7 +1394,10 @@ class ArticleListView {
         }
 
         if (articles.length === 0) {
-            this.root.appendChild(empty("mailOpen", "暂无文章", "在侧栏添加一个订阅源试试"));
+            const emptyDescription = this.storage.getSub(this.active)
+                ? "未展示文章可能是由于该订阅源在清理旧文章时间内没有更新过文章。可前往设置-通用修改清理旧文章时间"
+                : "在侧栏添加一个订阅源试试";
+            this.root.appendChild(empty("mailOpen", "暂无文章", emptyDescription));
             return;
         }
 
@@ -1407,6 +1499,8 @@ class Reader {
     contentArea: HTMLElement | null = null;
     dailyDate = "";
     dailyReport = "";
+    dailyReportDate = "";
+    dailyArticleIds: string[] = [];
     dailyLoading = false;
     fromDaily = false;
     onOpenArticle: (id: string) => void;
@@ -1479,10 +1573,16 @@ class Reader {
     }
 
     showDaily(date: string) {
+        if (this.dailyReportDate && this.dailyReportDate !== date) {
+            this.dailyReport = "";
+            this.dailyReportDate = "";
+            this.dailyArticleIds = [];
+        }
         this.mode = "daily";
         this.current = null;
         this.dailyDate = date;
         this.dailyLoading = false;
+        this.fromDaily = false;
         this.render();
     }
 
@@ -1531,9 +1631,9 @@ class Reader {
         ]);
         this.root.appendChild(topBar);
 
-        const prevArticle = this.getAdjacentArticle(a.id, "prev");
-        const nextArticle = this.getAdjacentArticle(a.id, "next");
-        const boundarySwitch = settings.reading?.boundaryScrollSwitch !== false;
+        const boundarySwitch = settings.reading?.boundaryScrollSwitch !== false && !this.fromDaily;
+        const prevArticle = boundarySwitch ? this.getAdjacentArticle(a.id, "prev") : null;
+        const nextArticle = boundarySwitch ? this.getAdjacentArticle(a.id, "next") : null;
 
         // 内容
         this.contentArea = el("div", { class: "ar-rd__content" });
@@ -1651,6 +1751,7 @@ class Reader {
 
     renderDaily() {
         const articles = this.getDailyArticles(this.dailyDate);
+        const citationArticles = this.getDailyCitationArticles();
         const topBar = el("div", { class: "ar-rd__topbar" }, [
             el("div", { class: "ar-rd__tabs" }, [iconLabel("wand", `AI 日报 · ${displayDate(this.dailyDate)}`, 13)]),
             button({ variant: "primary", icon: "save", text: "保存", disabled: !this.dailyReport || this.dailyLoading, onclick: () => this.saveDailyReport() }),
@@ -1659,8 +1760,33 @@ class Reader {
         const content = el("div", { class: "ar-rd__content" });
         if (!articles.length) {
             content.appendChild(empty("article", "这一天没有文章", "请选择有文章的日期"));
-        } else if (this.dailyReport || this.dailyLoading) {
-            content.appendChild(el("div", { class: "ar-daily-report ar-rd__body", html: mdToHtml(this.linkDailyCitations(this.dailyReport || "正在生成日报…", articles)) }));
+        } else if (this.dailyLoading) {
+            const streaming = !!this.dailyReport;
+            content.appendChild(el("div", { class: `ar-daily-generating ${streaming ? "ar-daily-generating--streaming" : ""}` }, [
+                el("div", { class: "ar-daily-generating__status" }, [
+                    el("div", { class: "ar-daily-generating__orb" }, [makeIcon("wand", 20)]),
+                    el("div", { class: "ar-daily-generating__copy" }, [
+                        el("div", { class: "ar-daily-generating__title" }, [
+                            "正在生成日报",
+                            el("span", { class: "ar-daily-generating__dots", "aria-hidden": "true" }, [
+                                el("span"), el("span"), el("span"),
+                            ]),
+                        ]),
+                        el("div", { class: "ar-daily-generating__desc" }, [`正在整理 ${articles.length} 篇文章，生成内容将实时呈现`]),
+                    ]),
+                ]),
+                streaming ? null : el("div", { class: "ar-daily-generating__skeleton", "aria-hidden": "true" }, [
+                    el("span", { class: "ar-daily-generating__line ar-daily-generating__line--title" }),
+                    el("span", { class: "ar-daily-generating__line" }),
+                    el("span", { class: "ar-daily-generating__line ar-daily-generating__line--short" }),
+                    el("span", { class: "ar-daily-generating__line ar-daily-generating__line--heading" }),
+                    el("span", { class: "ar-daily-generating__line" }),
+                    el("span", { class: "ar-daily-generating__line ar-daily-generating__line--medium" }),
+                ]),
+                this.renderDailyReportBody(streaming ? this.dailyReport : "", citationArticles, true),
+            ].filter(Boolean) as HTMLElement[]));
+        } else if (this.dailyReport) {
+            content.appendChild(this.renderDailyReportBody(this.dailyReport, citationArticles));
         } else {
             content.appendChild(el("div", { class: "ar-daily-hero" }, [
                 el("h1", {}, ["AI 日报"]),
@@ -1681,13 +1807,45 @@ class Reader {
 
     private saveDailyReport() {
         if (!this.dailyReport || this.dailyLoading) return;
-        const articles = this.getDailyArticles(this.dailyDate);
-        const markdown = this.linkDailyCitations(this.dailyReport, articles);
+        const markdown = this.linkDailyCitations(this.dailyReport, this.getDailyCitationArticles());
         saveMarkdownToSiyuan(`${displayDate(this.dailyDate)} AI 日报`, markdown);
     }
 
     private getDailyArticles(date: string): Article[] {
         return this.storage.getArticles().filter((a) => dateKey(a.pubDate) === date);
+    }
+
+    private getDailyCitationArticles(): (Article | undefined)[] {
+        if (this.dailyReportDate === this.dailyDate && this.dailyArticleIds.length) {
+            return this.dailyArticleIds.map((id) => this.storage.getArticle(id));
+        }
+        return this.getDailyArticles(this.dailyDate);
+    }
+
+    private renderDailyReportBody(markdown: string, articles: (Article | undefined)[], streaming = false): HTMLElement {
+        const body = el("div", {
+            class: `ar-daily-report ${streaming ? "ar-daily-report--streaming" : ""} ar-rd__body`,
+            html: markdown ? mdToHtml(this.linkDailyCitations(markdown, articles)) : "",
+        });
+        this.decorateDailyCitationLinks(body);
+        return body;
+    }
+
+    private decorateDailyCitationLinks(root: HTMLElement) {
+        root.querySelectorAll<HTMLAnchorElement>('a[href^="article:"]').forEach((link) => {
+            const articleId = link.getAttribute("href")?.replace(/^article:/, "") || "";
+            const article = this.storage.getArticle(articleId);
+            if (!article) return;
+            const sub = this.storage.getSub(article.subscriptionId);
+            link.classList.add("ar-daily-report__source-link");
+            link.removeAttribute("target");
+            link.removeAttribute("rel");
+            link.title = `${sub?.name || "未知订阅源"} · ${article.title || "(无标题)"}`;
+            clear(link);
+            link.appendChild(sub
+                ? subscriptionLogo(sub, "ar-daily-report__source-icon", 11)
+                : el("span", { class: "ar-daily-report__source-icon" }, [makeIcon("rss", 11)]));
+        });
     }
 
     private dailyCategoryName(article: Article): string {
@@ -1722,7 +1880,7 @@ class Reader {
         ].join("\n");
     }
 
-    private linkDailyCitations(markdown: string, articles: Article[]): string {
+    private linkDailyCitations(markdown: string, articles: (Article | undefined)[]): string {
         return markdown
             .replace(/\[↗\]\(article:/g, "[↗︎](article:")
             .replace(/\[跳转\]\(article:/g, "[↗︎](article:")
@@ -1738,6 +1896,9 @@ class Reader {
         const articles = this.getDailyArticles(date);
         if (!articles.length) return toast("这一天没有文章", "warn");
         if (!this.ai.providers().length) return toast("请先在设置中配置 AI 提供商", "error", 5000);
+        this.dailyDate = date;
+        this.dailyReportDate = date;
+        this.dailyArticleIds = articles.map((article) => article.id);
         this.dailyLoading = true;
         this.dailyReport = "";
         this.render();
@@ -1783,7 +1944,12 @@ class Reader {
 
     private updateDailyReport() {
         const body = this.root.querySelector<HTMLElement>(".ar-daily-report");
-        if (body) body.innerHTML = mdToHtml(this.linkDailyCitations(this.dailyReport || "正在生成日报…", this.getDailyArticles(this.dailyDate)));
+        if (body) {
+            body.innerHTML = mdToHtml(this.linkDailyCitations(this.dailyReport, this.getDailyCitationArticles()));
+            this.decorateDailyCitationLinks(body);
+            this.root.querySelector<HTMLElement>(".ar-daily-generating")?.classList.add("ar-daily-generating--streaming");
+            this.root.querySelector<HTMLElement>(".ar-daily-generating__skeleton")?.remove();
+        }
     }
 
     renderArticle(c: HTMLElement, a: Article, sub: Subscription | undefined) {
@@ -2277,10 +2443,13 @@ export class RssTab {
             openArticle(article.id, { centerInList: true });
         };
         const openArticleFromDaily = (id: string) => {
-            this.sidebar.setActive("all");
-            this.list.setActive("all");
-            this.list.setActiveArticle(id);
+            const article = this.storage.getArticle(id);
+            if (!article) {
+                toast("引用的文章已被清理或删除", "warn");
+                return;
+            }
             this.reader.showArticleFromDaily(id);
+            if (!article.isRead) this.storage.setRead(article.id, true);
         };
         this.list = new ArticleListView(
             listEl,

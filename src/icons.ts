@@ -53,7 +53,6 @@ import star from "@iconify-icons/solar/star-line-duotone";
 import stopCircle from "@iconify-icons/solar/stop-circle-line-duotone";
 import tag from "@iconify-icons/solar/tag-line-duotone";
 import target from "@iconify-icons/solar/target-line-duotone";
-import translation from "@iconify-icons/solar/translation-2-line-duotone";
 import trash from "@iconify-icons/solar/trash-bin-minimalistic-line-duotone";
 
 type SolarIconData = {
@@ -76,6 +75,10 @@ const infoPlain: SolarIconData = {
 
 const warnPlain: SolarIconData = {
     body: `<path d="M12 7.5v6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="M12 17h.01" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>`,
+};
+
+const translation: SolarIconData = {
+    body: `<g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8l6 6M4 14l6-6 2-3M2 5h12M7 2h1M22 22l-5-10-5 10M14 18h6"/></g>`,
 };
 
 const rssMain: SolarIconData = {
