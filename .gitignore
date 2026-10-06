@@ -5,6 +5,7 @@ index.js
 index.css
 i18n/
 *.log
+.vision-cache/
 .DS_Store
 .idea/
 .vscode/

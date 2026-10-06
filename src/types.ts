@@ -1,6 +1,19 @@
 // 核心类型
+import { DEFAULT_DAILY_REPORT } from "./dailyReportCore";
+
 export type ID = string;
 export type Timestamp = number;
+
+export type DailyReportMode = "fast" | "balanced" | "comprehensive";
+
+export interface DailyReportSettings {
+    mode?: DailyReportMode;
+    topN?: number;
+    batchSize?: number;
+    concurrency?: number;
+    /** 今日速览是否显示文章链接（默认 true） */
+    showLinks?: boolean;
+}
 
 export interface Category {
     id: ID; name: string; color?: string;
@@ -10,6 +23,8 @@ export interface Category {
 export interface Subscription {
     id: ID; url: string; name: string; categoryId?: ID; categoryName?: string;
     siteUrl?: string; description?: string; favicon?: string;
+    /** 用户手动设置的图标（图片 URL / dataURL / emoji），优先级高于自动抓取 */
+    customFavicon?: string;
     /** 上次尝试自动抓站点 favicon 的时间戳，用于 7 天退避 */
     faviconTriedAt?: number;
     enabled: boolean; errorCount: number; sortOrder: number;
@@ -42,6 +57,31 @@ export interface AIResult {
     generatedAt: number; durationMs: number; streamed?: boolean;
 }
 
+/** AI 日报缓存（按日期） */
+export interface DailyReportCache {
+    markdown: string;
+    articleIds: string[];
+    generatedAt: number;
+    providerId?: string;
+    model?: string;
+    /** 生成时选定的订阅源范围：[] 或缺失 = 全部，元素 cat:xxx / sub:xxx */
+    scope?: string[];
+    /** 两阶段日报：覆盖模式 */
+    mode?: DailyReportMode;
+    /** 文章集合哈希，用于组件缓存命中判断 */
+    articleHash?: string;
+    /** 阶段一全景速览文本 */
+    panorama?: string;
+    /** 阶段二选中的重点文章 ID */
+    selectedIds?: string[];
+    /** 单篇深读结果缓存 */
+    deepDives?: Record<string, string>;
+    /** 生成时今日速览是否显示链接 */
+    showLinks?: boolean;
+    /** 缓存结构版本 */
+    version?: number;
+}
+
 export type AIProviderType = "openai" | "anthropic" | "deepseek" | "zhipu" | "groq" | "ollama" | "custom";
 
 export interface AIProvider {
@@ -63,13 +103,15 @@ export interface AISettings {
     prompts: PromptTemplate[];
     enableCache: boolean;
     stream: boolean;
+    /** AI 日报两阶段生成配置 */
+    daily?: DailyReportSettings;
 }
 
 export interface Settings {
-    general: { language: string; articlesPerPage: number; autoRefresh: number; fullText?: boolean; articleRetentionDays: number; rsshubBaseUrl: string; rsshubCustomInstances?: string[]; };
+    general: { language: string; articlesPerPage: number; autoRefresh: number; fullText?: boolean; articleRetentionDays: number; rsshubBaseUrl: string; rsshubCustomInstances?: string[]; entryPosition?: "topbar-right" | "topbar-left" | "dock-left-top" | "dock-right-top" | "hidden"; };
     display: { fontSize: number; lineHeight: number; theme: string; };
-    reading: { fadeReadArticles: boolean; boundaryScrollSwitch: boolean; boundaryConfirmDelayMs: number; boundaryCooldownMs: number; boundaryTriggerDistance: number; };
-    save: { template: string; includeSourceLink: boolean; downloadImages: boolean; };
+    reading: { fadeReadArticles: boolean; boundaryScrollSwitch: boolean; boundaryConfirmDelayMs: number; boundaryCooldownMs: number; boundaryTriggerDistance: number; selection?: { copy?: boolean; translate?: boolean; search?: boolean; customUrl?: string; }; };
+    save: { template: string; includeSourceLink: boolean; downloadImages: boolean; cleanLinks?: boolean; defaultNotebook?: string; folderTemplate?: string; pathsByNotebook?: Record<string, string>; };
 }
 
 // 持久化 key
@@ -81,6 +123,7 @@ export const KEYS = {
     star: "ai_rss_star",
     settings: "ai_rss_settings",
     ai: "ai_rss_ai",
+    dailyReports: "ai_rss_daily_reports",
 } as const;
 
 // 默认值
@@ -107,8 +150,10 @@ export const DEFAULT_SETTINGS: Settings = {
     display: { fontSize: 15, lineHeight: 1.7, theme: "auto" },
     reading: { fadeReadArticles: true, boundaryScrollSwitch: true, boundaryConfirmDelayMs: 120, boundaryCooldownMs: 700, boundaryTriggerDistance: 95 },
     save: {
-        template: "---\ncustom-ai-rss-source: {{source}}\ncustom-ai-rss-link: {{link}}\n---\n\n# {{title}}\n\n> {{source}} · {{date}} · [原文]({{link}})\n\n{{content}}",
+        template: "# {{title}}\n\n> {{source}} · {{date}} · [原文]({{link}})\n\n{{content}}",
         includeSourceLink: true, downloadImages: true,
+        cleanLinks: true,
+        defaultNotebook: "", folderTemplate: "",
     },
 };
 
@@ -119,6 +164,7 @@ export const DEFAULT_AI: AISettings = {
     prompts: DEFAULT_PROMPTS,
     enableCache: true,
     stream: true,
+    daily: { ...DEFAULT_DAILY_REPORT },
 };
 
 // 精选订阅源（原创）

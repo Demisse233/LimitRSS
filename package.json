@@ -1,6 +1,6 @@
 {
   "name": "limitrss",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "LimitRSS, an AI-powered RSS reader plugin for SiYuan Note",
   "main": "index.js",
   "repository": {
@@ -15,7 +15,8 @@
     "dev": "webpack --config webpack.config.js --mode development --watch",
     "build": "webpack --config webpack.config.js --mode production",
     "type-check": "tsc --noEmit",
-    "dev:once": "webpack --config webpack.config.js --mode development"
+    "dev:once": "webpack --config webpack.config.js --mode development",
+    "test": "node --experimental-strip-types --test \"tests/*.test.ts\""
   },
   "keywords": [
     "siyuan",

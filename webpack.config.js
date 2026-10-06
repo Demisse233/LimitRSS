@@ -24,7 +24,7 @@ module.exports = (env, argv) => {
                     { from: "icon.png", to: "./dist/" },
                     { from: "README*.md", to: "./dist/" },
                     { from: "plugin.json", to: "./dist/" },
-                    { from: "src/i18n/", to: "./dist/i18n/" },
+                    { from: "src/i18n/", to: "./dist/i18n/", noErrorOnMissing: true },
                 ],
             }),
         );
@@ -40,14 +40,14 @@ module.exports = (env, argv) => {
         plugins.push(
             new CopyPlugin({
                 patterns: [
-                    { from: "src/i18n/", to: "./i18n/" },
+                    { from: "src/i18n/", to: "./i18n/", noErrorOnMissing: true },
                 ],
             }),
         );
     }
     return {
         mode: argv.mode || "development",
-        watch: !production,
+        watch: process.argv.includes("--watch"),
         devtool: production ? false : "eval-source-map",
         entry: {
             [production ? "dist/index" : "index"]: "./src/index.ts",

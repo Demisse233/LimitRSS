@@ -4,16 +4,22 @@
  */
 
 import { el, clear, on, escapeHtml, iconLabel, debounce } from "./ui";
-import { icon as makeIcon } from "./icons";
+import { icon as makeIcon, renderFavicon } from "./icons";
 import { button, dropdown, DropdownItem, toast, modal, empty, spinner } from "./components";
 import { Storage } from "./storage";
 import { AIService } from "./ai";
-import { Article, Subscription, AIResult, FEATURED, FEATURED_CATS, PromptTemplate, Category } from "./types";
+import { Article, Subscription, AIResult, FEATURED, FEATURED_CATS, PromptTemplate, Category, DailyReportSettings } from "./types";
+import { DEFAULT_DAILY_REPORT, articleSetHash, buildDeepDiveBatches, buildDeepDivePrompt, buildPanoramaPrompt, composeFinalReport, mapChunkCitations, normalizeDeepBatchMarkdown, runWithConcurrency, selectTopArticles, splitPanoramaArticles, stripCitationMarkers, stripSelectionSection, type DeepBatchResult, type DeepDiveArticle } from "./dailyReportCore";
 import { fetchAndParse, resolveSubscriptionFavicon, listRSSHubInstances, normalizeRSSHubBaseUrl } from "./fetcher";
 import { fetchFullText } from "./fulltext";
-import { saveMarkdownToSiyuan, saveToSiyuan } from "./save";
+import { renderFolderTemplate, saveMarkdownToSiyuan, saveToSiyuan } from "./save";
+import { openFaviconDialog } from "./favicon";
 import { openSettings } from "./settings";
 import { applyDisplaySettings } from "./theme";
+import { attachSelection } from "./selection";
+import { applyCategoryToggle, applySubToggle, categoryCheckState, scopePanelNeedsRebuild, scopeSummaryLabel, selectAll, selectNone, toggleCategoryExpanded } from "./dailyScopeCore";
+import { createPathsMemory, PathMemory } from "./saveTargetStore";
+import { stripMarkdownLinks } from "./markdownClean";
 import DOMPurify from "dompurify";
 import { genId } from "./util";
 
@@ -27,11 +33,35 @@ function sanitize(html: string): string {
     }) as string;
 }
 
+/** 显示端去重：完全相同的文本段落只保留第一处（处理部分源图文重复） */
+function dedupeBodyBlocks(root: HTMLElement) {
+    const seen = new Set<string>();
+    root.querySelectorAll("p, h1, h2, h3, h4, h5, h6, blockquote, li").forEach((n) => {
+        const t = (n.textContent || "").trim().replace(/\s+/g, " ");
+        if (t.length < 12) return;
+        if (seen.has(t)) {
+            n.remove();
+            return;
+        }
+        seen.add(t);
+    });
+}
+
 function postProcess(html: string): string {
     const div = document.createElement("div");
     div.innerHTML = html;
+    dedupeBodyBlocks(div);
     div.querySelectorAll("a").forEach((a) => { a.setAttribute("target", "_blank"); a.setAttribute("rel", "noopener noreferrer"); });
-    div.querySelectorAll("img").forEach((i) => { i.setAttribute("loading", "lazy"); });
+    const seenImg = new Set<string>();
+    div.querySelectorAll("img").forEach((i) => {
+        const src = i.getAttribute("src") || "";
+        if (src && seenImg.has(src)) {
+            i.remove(); // 相同图片只保留第一张，避免图文重复
+            return;
+        }
+        if (src) seenImg.add(src);
+        i.setAttribute("loading", "lazy");
+    });
     Array.from(div.querySelectorAll("table")).forEach((table) => {
         if (table.parentElement?.classList.contains("ar-rd__table-scroll")) return;
         const wrapper = document.createElement("div");
@@ -142,19 +172,8 @@ function fallbackFavicon(url: string): string {
 }
 
 function subscriptionLogo(sub: Subscription, className: string, fallbackSize = 13): HTMLElement {
-    const logoUrl = sub.favicon || fallbackFavicon(sub.siteUrl || sub.url);
-    const logo = el("span", { class: className });
-    if (logoUrl) {
-        const img = el("img", { src: logoUrl, alt: "", loading: "lazy" }) as HTMLImageElement;
-        img.addEventListener("error", () => {
-            clear(logo);
-            logo.appendChild(makeIcon("rss", fallbackSize));
-        }, { once: true });
-        logo.appendChild(img);
-    } else {
-        logo.appendChild(makeIcon("rss", fallbackSize));
-    }
-    return logo;
+    const logoUrl = sub.customFavicon || sub.favicon || fallbackFavicon(sub.siteUrl || sub.url);
+    return renderFavicon(logoUrl, className, fallbackSize);
 }
 
 function buildTranslatableHtml(sourceHtml: string, startId = 1): { html: string; segments: { id: number; text: string }[] } {
@@ -307,7 +326,7 @@ class Sidebar {
             active: this.active,
             smart: [articles.length, totalUnread, todayUnread, starred, dailyDates],
             cats: cats.map((cat) => [cat.id, cat.name, cat.sortOrder]),
-            subs: subs.map((sub) => [sub.id, sub.name, sub.categoryId || "", sub.categoryName || "", sub.enabled, sub.errorCount, sub.favicon || "", this.storage.unreadCount(sub.id)]),
+            subs: subs.map((sub) => [sub.id, sub.name, sub.categoryId || "", sub.categoryName || "", sub.enabled, sub.errorCount, sub.favicon || "", sub.customFavicon || "", this.storage.unreadCount(sub.id)]),
         });
     }
 
@@ -413,20 +432,8 @@ class Sidebar {
     renderSub(s: Subscription) {
         const isActive = this.active === s.id;
         const unread = this.storage.unreadCount(s.id);
-        const logoUrl = s.favicon || fallbackFavicon(s.siteUrl || s.url);
-        const logo = el("span", { class: `ar-side__sub-logo ${s.errorCount > 0 ? "ar-side__sub-logo--err" : ""}` });
-        if (logoUrl) {
-            const img = el("img", { src: logoUrl, alt: "", loading: "lazy" }) as HTMLImageElement;
-            img.addEventListener("error", () => {
-                clear(logo);
-                logo.classList.add("ar-side__sub-logo--fallback");
-                logo.appendChild(makeIcon("rss", 11));
-            }, { once: true });
-            logo.appendChild(img);
-        } else {
-            logo.classList.add("ar-side__sub-logo--fallback");
-            logo.appendChild(makeIcon("rss", 11));
-        }
+        const logoUrl = s.customFavicon || s.favicon || fallbackFavicon(s.siteUrl || s.url);
+        const logo = renderFavicon(logoUrl, `ar-side__sub-logo ${s.errorCount > 0 ? "ar-side__sub-logo--err" : ""}`, 11);
         return el("button", {
             class: `ar-side__sub ${isActive ? "ar-side__sub--active" : ""}`,
             onclick: () => { this.active = s.id; this.onChange(s.id); this.render(); },
@@ -961,6 +968,7 @@ class Sidebar {
         const items: DropdownItem[] = [
             { label: "立即刷新", icon: "refresh", onClick: () => this.onRefresh(s.id) },
             { label: "重命名", icon: "edit", onClick: () => this.showRenameSubDialog(s) },
+            { label: "设置图标", icon: "image", onClick: () => openFaviconDialog(this.storage, s) },
             { divider: true, label: "" },
             { label: "暂停/恢复", icon: s.enabled ? "pause" : "play", onClick: () => this.storage.patchSubMeta(s.id, { enabled: !s.enabled }) },
             { divider: true, label: "" },
@@ -1150,6 +1158,13 @@ class ArticleListView {
     filter: "all" | "unread" | "read" | "starred" = "all";
     search: string = "";
     dailyDate: string = "";
+    dailyScope: string[] = [];
+    dailyScopeReady = false;
+    dailyExpandedCats = new Set<string>();
+    dailyScopeOpen = false;
+    private dailyScopeBtnEl: HTMLButtonElement | null = null;
+    private dailyScopePanelEl: HTMLElement | null = null;
+    private scopeDocClick: ((ev: MouseEvent) => void) | null = null;
     visibleCount: number = 30;
     activeArticleId: string | null = null;
     private listScrollTop = 0;
@@ -1160,12 +1175,14 @@ class ArticleListView {
     private restoreSearchFocus = false;
     onOpen: (id: string) => void;
     onDaily: (date: string) => void;
-    onGenerateDaily: (date: string) => void;
+    onGenerateDaily: (date: string, force: boolean, scopes: string[]) => void;
     onRefresh: () => void;
     onMarkRead: (ids: string[]) => void;
+    renderDockBack?: () => HTMLElement | null;
     refreshStatus: "idle" | "refreshing" | "done" = "idle";
+    refreshText = "";
 
-    constructor(root: HTMLElement, storage: Storage, onOpen: (id: string) => void, onDaily: (date: string) => void, onGenerateDaily: (date: string) => void, onRefresh: () => void, onMarkRead: (ids: string[]) => void) {
+    constructor(root: HTMLElement, storage: Storage, onOpen: (id: string) => void, onDaily: (date: string) => void, onGenerateDaily: (date: string, force: boolean, scopes: string[]) => void, onRefresh: () => void, onMarkRead: (ids: string[]) => void, renderDockBack?: () => HTMLElement | null) {
         this.root = root;
         this.storage = storage;
         this.onOpen = onOpen;
@@ -1173,12 +1190,14 @@ class ArticleListView {
         this.onGenerateDaily = onGenerateDaily;
         this.onRefresh = onRefresh;
         this.onMarkRead = onMarkRead;
+        this.renderDockBack = renderDockBack;
         storage.on(() => this.render());
         this.render();
     }
 
-    setRefreshStatus(status: ArticleListView["refreshStatus"]) {
+    setRefreshStatus(status: ArticleListView["refreshStatus"], text?: string) {
         this.refreshStatus = status;
+        this.refreshText = text || "";
         this.render();
     }
 
@@ -1254,7 +1273,16 @@ class ArticleListView {
         return this.storage.getArticles().filter((a) => dateKey(a.pubDate) === key);
     }
 
+    /** 移除汇总范围面板的“点击外部关闭”监听，避免跨渲染残留 */
+    private detachScopeDocClick() {
+        if (this.scopeDocClick) {
+            document.removeEventListener("click", this.scopeDocClick);
+            this.scopeDocClick = null;
+        }
+    }
+
     private renderDailyPanel() {
+        this.detachScopeDocClick();
         const dates = this.getArticleDates();
         const header = el("div", { class: "ar-list__header" }, [
             el("div", { class: "ar-list__title" }, [iconLabel("wand", "AI 日报", 15)]),
@@ -1276,15 +1304,165 @@ class ArticleListView {
             this.render();
         });
         const articles = this.articlesOnDate(this.dailyDate);
+        const hasReport = !!this.storage.getDailyReport(this.dailyDate)?.markdown;
+        const subs = this.storage.getSubs();
+        const cats = this.storage.getCats();
+        if (!this.dailyScopeReady && subs.length) {
+            this.dailyScope = subs.map((s) => s.id);
+            this.dailyScopeReady = true;
+        }
+        // 重渲染前保留旧面板滚动位置；展开/折叠/勾选一律原地更新，避免跳回顶部
+        const prevScopeScroll = this.dailyScopePanelEl?.scrollTop || 0;
+        const scopeBtn = el("button", { class: "ar-input ar-scope-btn", type: "button" }) as HTMLButtonElement;
+        const scopePanel = el("div", { class: "ar-scope-panel" });
+        this.dailyScopeBtnEl = scopeBtn;
+        this.dailyScopePanelEl = scopePanel;
+        const scopeSummary = () => scopeSummaryLabel(this.dailyScope.length, subs.length);
+        const setScopeBtn = () => {
+            clear(scopeBtn);
+            scopeBtn.appendChild(el("span", {}, [scopeSummary()]));
+            scopeBtn.appendChild(el("span", { class: "ar-scope-btn__caret" }, [makeIcon("chevronDown", 12)]));
+        };
+        const scopeState = {
+            catChecks: new Map<string, HTMLInputElement>(),
+            subChecks: new Map<string, HTMLInputElement>(),
+            subWraps: new Map<string, HTMLElement>(),
+            catSubIds: new Map<string, string[]>(),
+        };
+        // 只更新复选框状态与摘要，不重建 DOM（展开/折叠不会跳动滚动位置）
+        const refreshScope = () => {
+            setScopeBtn();
+            if (!this.dailyScopeOpen) return;
+            scopeState.catSubIds.forEach((ids, label) => {
+                const cb = scopeState.catChecks.get(label);
+                if (!cb) return;
+                const state = categoryCheckState(this.dailyScope, ids);
+                cb.checked = state === "checked";
+                cb.indeterminate = state === "indeterminate";
+            });
+            scopeState.subChecks.forEach((cb, id) => { cb.checked = this.dailyScope.includes(id); });
+        };
+        const renderScopePanel = () => {
+            clear(scopePanel);
+            scopeState.catChecks.clear();
+            scopeState.subChecks.clear();
+            scopeState.subWraps.clear();
+            scopeState.catSubIds.clear();
+            const allIds = subs.map((s) => s.id);
+            scopePanel.appendChild(el("div", { class: "ar-scope-panel__row ar-scope-panel__row--all" }, [
+                el("button", { class: "ar-scope-panel__action", type: "button", onclick: () => { this.dailyScope = selectAll(allIds); refreshScope(); } }, ["全选"]),
+                el("button", { class: "ar-scope-panel__action", type: "button", onclick: () => { this.dailyScope = selectNone(); refreshScope(); } }, ["取消全选"]),
+            ]));
+            const catIdOf = (sub: Subscription) => (sub ? this.storage.resolveSubCategoryId(sub) : undefined);
+            const groups: { label: string; color?: string; subs: Subscription[] }[] = [];
+            const noCat = subs.filter((s) => !catIdOf(s));
+            if (noCat.length) groups.push({ label: "未分类", subs: noCat });
+            cats.filter((c) => c.id !== "c_default").forEach((c) => {
+                const list = subs.filter((s) => catIdOf(s) === c.id);
+                if (list.length) groups.push({ label: c.name, color: c.color, subs: list });
+            });
+            groups.forEach((g) => {
+                const ids = g.subs.map((s) => s.id);
+                scopeState.catSubIds.set(g.label, ids);
+                const state = categoryCheckState(this.dailyScope, ids);
+                const catCheck = el("input", { type: "checkbox", checked: state === "checked" }) as HTMLInputElement;
+                catCheck.indeterminate = state === "indeterminate";
+                catCheck.addEventListener("click", (ev) => {
+                    ev.stopPropagation();
+                    this.dailyScope = applyCategoryToggle(this.dailyScope, ids, catCheck.checked);
+                    refreshScope();
+                });
+                scopeState.catChecks.set(g.label, catCheck);
+                const subWrap = el("div", { class: "ar-scope-panel__subs" });
+                g.subs.forEach((s) => {
+                    const subCheck = el("input", { type: "checkbox", checked: this.dailyScope.includes(s.id) }) as HTMLInputElement;
+                    subCheck.addEventListener("click", (ev) => {
+                        ev.stopPropagation();
+                        this.dailyScope = applySubToggle(this.dailyScope, s.id, subCheck.checked);
+                        refreshScope();
+                    });
+                    scopeState.subChecks.set(s.id, subCheck);
+                    subWrap.appendChild(el("label", { class: "ar-scope-panel__row ar-scope-panel__sub" }, [
+                        subCheck,
+                        g.color ? el("span", { class: "ar-scope-panel__dot", style: { background: g.color } }) : null,
+                        el("span", { class: "ar-scope-panel__sub-name" }, [s.name]),
+                    ]));
+                });
+                scopeState.subWraps.set(g.label, subWrap);
+                const expanded = this.dailyExpandedCats.has(g.label);
+                scopePanel.appendChild(el("label", { class: "ar-scope-panel__row ar-scope-panel__cat" }, [
+                    catCheck,
+                    g.color ? el("span", { class: "ar-scope-panel__dot", style: { background: g.color } }) : null,
+                    el("span", { class: "ar-scope-panel__cat-name" }, [g.label]),
+                    el("span", { class: "ar-scope-panel__count" }, [`${ids.length}`]),
+                    el("button", {
+                        class: "ar-scope-panel__toggle", type: "button",
+                        title: expanded ? "折叠" : "展开",
+                        onclick: (ev) => {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            (ev.currentTarget as HTMLElement).blur?.();
+                            this.dailyExpandedCats = toggleCategoryExpanded(this.dailyExpandedCats, g.label);
+                            const isExpanded = this.dailyExpandedCats.has(g.label);
+                            subWrap.style.display = isExpanded ? "block" : "none";
+                            const btn = ev.currentTarget as HTMLElement;
+                            btn.title = isExpanded ? "折叠" : "展开";
+                            clear(btn);
+                            btn.appendChild(makeIcon(isExpanded ? "chevronDown" : "chevronRight", 12));
+                        },
+                    }, [makeIcon(expanded ? "chevronDown" : "chevronRight", 12)]),
+                ]));
+                scopePanel.appendChild(subWrap);
+                subWrap.style.display = expanded ? "block" : "none";
+            });
+        };
+        setScopeBtn();
+        const openScopePanel = () => {
+            this.dailyScopeOpen = true;
+            if (scopePanelNeedsRebuild("open")) renderScopePanel();
+            scopePanel.style.display = "block";
+            this.detachScopeDocClick();
+            const onDocClick = (ev: MouseEvent) => {
+                const target = ev.target as Node;
+                const panelEl = this.dailyScopePanelEl;
+                const btnEl = this.dailyScopeBtnEl;
+                if (panelEl?.contains(target) || btnEl?.contains(target)) return;
+                this.dailyScopeOpen = false;
+                if (panelEl) panelEl.style.display = "none";
+                this.detachScopeDocClick();
+            };
+            this.scopeDocClick = onDocClick;
+            document.addEventListener("click", onDocClick);
+        };
+        const closeScopePanel = () => {
+            this.dailyScopeOpen = false;
+            scopePanel.style.display = "none";
+            this.detachScopeDocClick();
+        };
+        scopeBtn.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            if (this.dailyScopeOpen) closeScopePanel();
+            else openScopePanel();
+        });
+        scopePanel.style.display = "none";
+        // 触发方式与上方日期下拉一致：点触发栏打开，点面板外关闭，面板内操作不关闭
         const panel = el("div", { class: "ar-daily-panel" }, [
             el("div", { class: "ar-form__row" }, [
                 el("label", { class: "ar-form__label" }, ["选择日期"]),
                 select,
             ]),
-            button({ variant: "primary", icon: "wand", text: "生成日报", block: true, onclick: () => this.onGenerateDaily(this.dailyDate) }),
+            el("div", { class: "ar-form__row" }, [
+                el("label", { class: "ar-form__label" }, ["汇总范围"]),
+                el("div", { class: "ar-scope-wrap" }, [scopeBtn, scopePanel]),
+            ]),
+            button({ variant: "primary", icon: "wand", text: hasReport ? "重新生成" : "生成日报", block: true, onclick: () => this.onGenerateDaily(this.dailyDate, hasReport, this.dailyScope) }),
             el("div", { class: "ar-form__hint" }, [`将汇总当天 ${articles.length} 篇文章，按分类生成摘要并附文章跳转。`]),
         ]);
         this.root.appendChild(panel);
+        if (this.dailyScopeOpen) {
+            openScopePanel();
+            if (prevScopeScroll > 0) scopePanel.scrollTop = prevScopeScroll;
+        }
         const preview = el("div", { class: "ar-daily-list" });
         const bySub = new Map<string, { sub?: Subscription; count: number }>();
         articles.forEach((a) => {
@@ -1370,13 +1548,14 @@ class ArticleListView {
         }
 
         const unreadIds = articles.filter((a) => !a.isRead).map((a) => a.id);
-        const statusText = this.refreshStatus === "refreshing" ? "正在刷新…" : this.refreshStatus === "done" ? "刷新完成" : "";
+        const statusText = this.refreshStatus === "refreshing" ? (this.refreshText || "正在刷新…") : this.refreshStatus === "done" ? "刷新完成" : "";
         const header = el("div", { class: "ar-list__header" }, [
             el("div", { class: "ar-list__title-wrap" }, [
                 el("div", { class: "ar-list__title" }, [title]),
                 statusText ? el("span", { class: `ar-list__status-text ar-list__status-text--${this.refreshStatus}` }, [statusText]) : null,
             ].filter(Boolean) as HTMLElement[]),
             el("div", { class: "ar-list__header-actions" }, [
+                this.renderDockBack?.() || null,
                 button({ variant: "icon", icon: "check", title: unreadIds.length ? `将当前列表 ${unreadIds.length} 篇标为已读` : "当前列表没有未读文章", disabled: unreadIds.length === 0, onclick: () => this.onMarkRead(unreadIds) }),
                 button({ variant: "icon", icon: "refresh", title: this.refreshStatus === "refreshing" ? "正在刷新" : "刷新", disabled: this.refreshStatus === "refreshing", className: this.refreshStatus === "refreshing" ? "ar-list__refresh-btn--spinning" : "", onclick: () => this.onRefresh() }),
             ]),
@@ -1499,6 +1678,7 @@ class Reader {
     contentArea: HTMLElement | null = null;
     dailyDate = "";
     dailyReport = "";
+    dailyProgress = "";
     dailyReportDate = "";
     dailyArticleIds: string[] = [];
     dailyLoading = false;
@@ -1506,18 +1686,24 @@ class Reader {
     onOpenArticle: (id: string) => void;
     onNavigateArticle: (currentId: string, direction: "prev" | "next") => void;
     getAdjacentArticle: (currentId: string, direction: "prev" | "next") => Article | null;
+    renderDockBack?: () => HTMLElement | null;
     private boundarySwitchAt = 0;
     private switchHintTimer: number | null = null;
     private switchArmed: { direction: "prev" | "next"; articleId: string; expiresAt: number; distance: number; lastWheelAt: number } | null = null;
     private renderedArticleSignature = "";
+    private aiAbort: AbortController | null = null;
+    private dailyAbort: AbortController | null = null;
+    private translationStopBtn: HTMLElement | null = null;
 
-    constructor(root: HTMLElement, storage: Storage, ai: AIService, onOpenArticle: (id: string) => void, onNavigateArticle: (currentId: string, direction: "prev" | "next") => void, getAdjacentArticle: (currentId: string, direction: "prev" | "next") => Article | null) {
+    constructor(root: HTMLElement, storage: Storage, ai: AIService, onOpenArticle: (id: string) => void, onNavigateArticle: (currentId: string, direction: "prev" | "next") => void, getAdjacentArticle: (currentId: string, direction: "prev" | "next") => Article | null, renderDockBack?: () => HTMLElement | null) {
         this.root = root;
         this.storage = storage;
         this.ai = ai;
         this.onOpenArticle = onOpenArticle;
         this.onNavigateArticle = onNavigateArticle;
         this.getAdjacentArticle = getAdjacentArticle;
+        this.renderDockBack = renderDockBack;
+        attachSelection(this.root, { ai, storage });
         storage.on(() => this.handleStorageChange());
         this.render();
     }
@@ -1583,6 +1769,12 @@ class Reader {
         this.dailyDate = date;
         this.dailyLoading = false;
         this.fromDaily = false;
+        const cached = this.storage.getDailyReport(date);
+        if (cached?.markdown) {
+            this.dailyReport = cached.markdown;
+            this.dailyReportDate = date;
+            this.dailyArticleIds = cached.articleIds || [];
+        }
         this.render();
     }
 
@@ -1609,21 +1801,30 @@ class Reader {
         // 顶部
         const topBar = el("div", { class: "ar-rd__topbar" }, [
             el("div", { class: "ar-rd__tabs" }, [
-                this.fromDaily && this.dailyDate ? el("button", { class: "ar-rd__tab ar-rd__tab--return", onclick: () => this.showDaily(this.dailyDate) }, [iconLabel("chevronLeft", "返回日报", 13)]) : null,
-                el("button", { class: `ar-rd__tab ${this.summaryVisible ? "ar-rd__tab--active" : ""}`, onclick: () => this.showInlinePrompt(a, SUMMARY_PROMPT) }, [iconLabel("ai", "AI 总结", 13)]),
-                el("button", { class: `ar-rd__tab ${this.translationVisible ? "ar-rd__tab--active" : ""}`, onclick: () => this.showInlinePrompt(a, TRANSLATE_PROMPT) }, [iconLabel("translate", "AI 翻译", 13)]),
+                this.fromDaily && this.dailyDate ? el("button", { class: "ar-rd__tab ar-rd__tab--icon ar-rd__tab--return", title: "返回日报", onclick: () => this.showDaily(this.dailyDate) }, [makeIcon("chevronLeft", 15)]) : null,
+                el("button", { class: `ar-rd__tab ar-rd__tab--icon ${this.summaryVisible ? "ar-rd__tab--active" : ""}`, title: "AI 总结", onclick: () => this.showInlinePrompt(a, SUMMARY_PROMPT) }, [makeIcon("ai", 15)]),
+                el("button", { class: `ar-rd__tab ar-rd__tab--icon ${this.translationVisible ? "ar-rd__tab--active" : ""}`, title: "AI 翻译", onclick: () => this.showInlinePrompt(a, TRANSLATE_PROMPT) }, [makeIcon("translate", 15)]),
+                this.translationVisible && isTranslationComplete(a.aiResults?.[TRANSLATE_PROMPT.id]) ? el("button", { class: "ar-rd__tab ar-rd__tab--icon", title: "重新翻译", onclick: () => this.rerollTranslation(a) }, [makeIcon("refresh", 15)]) : null,
             ].filter(Boolean) as HTMLElement[]),
             (() => {
                 const actions = el("div", { class: "ar-rd__actions" });
                 const items: (HTMLElement | null)[] = [
+                    this.renderDockBack?.() || null,
                     button({ variant: "icon", icon: "star", title: a.isStarred ? "取消星标" : "星标", active: a.isStarred, className: "ar-rd__state-btn ar-rd__state-btn--star", onclick: () => this.storage.setStar(a.id, !a.isStarred) }),
                     button({ variant: "icon", icon: "check", title: a.isRead ? "标为未读" : "标为已读", active: a.isRead, className: "ar-rd__state-btn ar-rd__state-btn--read", onclick: () => this.storage.setRead(a.id, !a.isRead) }),
                     a.link
                         ? (a.fullText
-                            ? (() => button({ variant: "secondary", icon: "refresh", text: "恢复原文", title: "恢复 RSS 原文内容", onclick: () => this.revertFullText(a) }))()
-                            : (() => button({ variant: "primary", icon: "download", text: "抓取全文", title: "访问原文链接解析正文，替代 RSS 摘要", onclick: () => this.fetchFullTextFor(a) }))())
+                            ? (() => button({ variant: "ghost", icon: "fileText", title: "恢复 RSS 原文内容", onclick: () => this.revertFullText(a) }))()
+                            : (() => button({ variant: "ghost", icon: "globe", title: "访问原文链接解析正文，替代 RSS 摘要", onclick: () => this.fetchFullTextFor(a) }))())
                         : null,
-                    button({ variant: "primary", icon: "save", text: "保存", onclick: () => saveToSiyuan(a, settings, a.aiResults || {}).then((id) => { if (id) this.storage.setSaved(a.id, id); }) }),
+                    button({
+                        variant: "ghost", icon: "inbox", title: "保存到思源",
+                        onclick: () => {
+                            // 从最新存储取文章与 AI 结果，避免闭包引用过期导致总结丢失
+                            const latest = this.storage.getArticle(a.id) || a;
+                            saveToSiyuan(latest, settings, latest.aiResults || a.aiResults || {}, this.storage.getSub(latest.subscriptionId), this.savePathMemory()).then((id) => { if (id) this.storage.setSaved(latest.id, id); });
+                        },
+                    }),
                 ];
                 items.filter(Boolean).forEach((b) => actions.appendChild(b as HTMLElement));
                 return actions;
@@ -1754,7 +1955,13 @@ class Reader {
         const citationArticles = this.getDailyCitationArticles();
         const topBar = el("div", { class: "ar-rd__topbar" }, [
             el("div", { class: "ar-rd__tabs" }, [iconLabel("wand", `AI 日报 · ${displayDate(this.dailyDate)}`, 13)]),
-            button({ variant: "primary", icon: "save", text: "保存", disabled: !this.dailyReport || this.dailyLoading, onclick: () => this.saveDailyReport() }),
+            el("div", { class: "ar-rd__actions" }, [
+                this.renderDockBack?.() || null,
+                this.dailyLoading
+                    ? button({ variant: "ghost", icon: "stop", title: "停止生成", onclick: () => this.dailyAbort?.abort() })
+                    : null,
+                button({ variant: "ghost", icon: "inbox", title: "保存日报到思源", disabled: !this.dailyReport || this.dailyLoading, onclick: () => this.saveDailyReport() }),
+            ]),
         ]);
         this.root.appendChild(topBar);
         const content = el("div", { class: "ar-rd__content" });
@@ -1772,7 +1979,7 @@ class Reader {
                                 el("span"), el("span"), el("span"),
                             ]),
                         ]),
-                        el("div", { class: "ar-daily-generating__desc" }, [`正在整理 ${articles.length} 篇文章，生成内容将实时呈现`]),
+                        el("div", { class: "ar-daily-generating__desc" }, [this.dailyProgress || `正在整理 ${articles.length} 篇文章，生成内容将实时呈现`]),
                     ]),
                 ]),
                 streaming ? null : el("div", { class: "ar-daily-generating__skeleton", "aria-hidden": "true" }, [
@@ -1805,14 +2012,34 @@ class Reader {
         this.root.appendChild(content);
     }
 
+    /** 保存目标路径记忆适配器：读写插件设置中的 pathsByNotebook */
+    private savePathMemory(): PathMemory {
+        return createPathsMemory(
+            () => this.storage.getSettings().save.pathsByNotebook,
+            (paths) => {
+                const save = this.storage.getSettings().save;
+                this.storage.updateSettings({ save: { ...save, pathsByNotebook: paths } });
+            },
+        );
+    }
+
     private saveDailyReport() {
         if (!this.dailyReport || this.dailyLoading) return;
-        const markdown = this.linkDailyCitations(this.dailyReport, this.getDailyCitationArticles());
-        saveMarkdownToSiyuan(`${displayDate(this.dailyDate)} AI 日报`, markdown);
+        const markdown = stripMarkdownLinks(this.linkDailyCitations(this.dailyReport, this.getDailyCitationArticles()));
+        const folder = renderFolderTemplate(this.storage.getSettings().save.folderTemplate);
+        saveMarkdownToSiyuan(`${displayDate(this.dailyDate)} AI 日报`, markdown, folder, this.savePathMemory());
     }
 
     private getDailyArticles(date: string): Article[] {
         return this.storage.getArticles().filter((a) => dateKey(a.pubDate) === date);
+    }
+
+    /** 按订阅源范围过滤当天文章：空数组 = 全部；否则只保留选中订阅源的文章 */
+    private filterDailyArticles(date: string, scopeIds: string[]): Article[] {
+        const all = this.getDailyArticles(date);
+        if (!scopeIds.length) return all;
+        const set = new Set(scopeIds);
+        return all.filter((a) => set.has(a.subscriptionId));
     }
 
     private getDailyCitationArticles(): (Article | undefined)[] {
@@ -1842,9 +2069,13 @@ class Reader {
             link.removeAttribute("rel");
             link.title = `${sub?.name || "未知订阅源"} · ${article.title || "(无标题)"}`;
             clear(link);
-            link.appendChild(sub
-                ? subscriptionLogo(sub, "ar-daily-report__source-icon", 11)
-                : el("span", { class: "ar-daily-report__source-icon" }, [makeIcon("rss", 11)]));
+            if (!sub) {
+                link.appendChild(el("span", { class: "ar-daily-report__source-icon" }, [makeIcon("rss", 11)]));
+            } else if (sub.customFavicon || sub.favicon) {
+                link.appendChild(subscriptionLogo(sub, "ar-daily-report__source-icon", 11));
+            } else {
+                link.appendChild(el("span", { class: "ar-daily-report__source-icon ar-daily-report__source-icon--letter" }, [(sub.name || "?").trim().charAt(0).toUpperCase()]));
+            }
         });
     }
 
@@ -1853,31 +2084,6 @@ class Reader {
         const catId = sub ? this.storage.resolveSubCategoryId(sub) : undefined;
         const cat = catId ? this.storage.getCats().find((c) => c.id === catId) : null;
         return cat?.name || "未分类";
-    }
-
-    private buildDailyPrompt(date: string, articles: Article[]): string {
-        const lines = articles.map((a, index) => {
-            const sub = this.storage.getSub(a.subscriptionId);
-            const text = htmlToPlainText(a.description || a.content || "").slice(0, 320);
-            return [
-                `编号：${index + 1}`,
-                `分类：${this.dailyCategoryName(a)}`,
-                `来源：${sub?.name || "未知来源"}`,
-                `标题：${a.title || "(无标题)"}`,
-                `摘要：${text}`,
-            ].join("\n");
-        }).join("\n\n");
-        return [
-            `请基于 ${displayDate(date)} 的 RSS 文章生成中文 AI 日报。`,
-            "要求：",
-            "1. 按分类组织内容，每个分类给出 2-4 句总览。",
-            "2. 先给出「今日速览」，再给出「分类总结」。",
-            "3. 不要编造文章之外的信息。",
-            "4. 每个关键判断、趋势或总结句后面必须直接标注对应文章编号，例如 [1]、[2][5]；不要把链接或编号集中放到最后。",
-            "5. 输出 Markdown。",
-            "",
-            lines,
-        ].join("\n");
     }
 
     private linkDailyCitations(markdown: string, articles: (Article | undefined)[]): string {
@@ -1892,52 +2098,233 @@ class Reader {
         });
     }
 
-    async generateDailyReport(date: string) {
-        const articles = this.getDailyArticles(date);
-        if (!articles.length) return toast("这一天没有文章", "warn");
-        if (!this.ai.providers().length) return toast("请先在设置中配置 AI 提供商", "error", 5000);
+    private dailyReportConfig(): Required<DailyReportSettings> {
+        const d = this.ai.settings.daily || {};
+        return {
+            mode: d.mode || DEFAULT_DAILY_REPORT.mode,
+            topN: d.topN ?? DEFAULT_DAILY_REPORT.topN,
+            batchSize: d.batchSize ?? DEFAULT_DAILY_REPORT.batchSize,
+            concurrency: d.concurrency ?? DEFAULT_DAILY_REPORT.concurrency,
+            showLinks: d.showLinks ?? DEFAULT_DAILY_REPORT.showLinks,
+        };
+    }
+
+    /** 单次日报调用：流式优先，空结果降级为非流式重试一次 */
+    private async callDailyOnce(
+        fakeArticle: Article,
+        tpl: PromptTemplate,
+        prompt: string,
+        signal: AbortSignal,
+        onChunk?: (chunk: string) => void,
+    ): Promise<string> {
+        return new Promise<string>((resolve, reject) => {
+            let full = "";
+            this.ai.streamRenderedTemplate(fakeArticle, tpl, prompt, {
+                onChunk: (chunk) => {
+                    full += chunk;
+                    onChunk?.(chunk);
+                },
+                onDone: async (final) => {
+                    if (final || full) {
+                        resolve(final || full);
+                        return;
+                    }
+                    try {
+                        const fallback = await this.ai.chatRendered(tpl, prompt);
+                        resolve(fallback?.content || "");
+                    } catch (e) {
+                        reject(e);
+                    }
+                },
+                onError: (err) => reject(err),
+                signal,
+            }).catch(reject);
+        });
+    }
+
+    async generateDailyReport(date: string, options: { force?: boolean; scope?: string[] } = {}) {
+        const scope = options.scope || [];
+        const articles = this.filterDailyArticles(date, scope);
+        if (!articles.length) {
+            toast("所选范围这一天没有文章", "warn");
+            return;
+        }
+        if (!this.ai.providers().length) {
+            toast("请先在设置中配置 AI 提供商", "error", 5000);
+            return;
+        }
+        const cfg = this.dailyReportConfig();
+        const hash = articleSetHash(articles);
+        const scopeKey = scope.slice().sort().join("|");
+        const cached = this.storage.getDailyReport(date);
+        const cachedKey = Array.isArray(cached?.scope) ? cached.scope.slice().sort().join("|") : "";
+        const needDeep = cfg.mode !== "fast";
+        // 1) 最终日报完整命中
+        if (cached?.markdown && !options.force && cachedKey === scopeKey && cached.mode === cfg.mode && cached.articleHash === hash && cached.showLinks === cfg.showLinks) {
+            this.dailyDate = date;
+            this.dailyReportDate = date;
+            this.dailyArticleIds = cached.articleIds || articles.map((article) => article.id);
+            this.dailyReport = cached.markdown;
+            this.dailyLoading = false;
+            this.render();
+            return;
+        }
+        // 2) 组件缓存命中：全景 + 选中列表 + 深读齐全
+        const selectedIds = Array.isArray(cached?.selectedIds) ? cached.selectedIds : [];
+        const deepComplete = !needDeep || (
+            selectedIds.length > 0 &&
+            selectedIds.every((id) => Boolean(cached?.deepDives?.[id]))
+        );
+        if (cached?.panorama && cached.mode === cfg.mode && cached.articleHash === hash && cached.showLinks === cfg.showLinks && deepComplete) {
+            const selected = selectedIds
+                .map((id) => articles.find((a) => a.id === id))
+                .filter(Boolean) as Article[];
+            const batches = buildDeepDiveBatches(selected, cfg.batchSize);
+            const deepBatches: DeepBatchResult[] = needDeep
+                ? batches.map((b) => ({
+                    articles: b,
+                    markdown: b.map((a) => cached!.deepDives![a.id] || "").join("\n\n"),
+                }))
+                : [];
+            this.dailyDate = date;
+            this.dailyReportDate = date;
+            this.dailyArticleIds = articles.map((article) => article.id);
+            this.dailyReport = composeFinalReport(cached.panorama, deepBatches);
+            this.dailyLoading = false;
+            this.render();
+            return;
+        }
+        // 3) 全量生成（两阶段）
         this.dailyDate = date;
         this.dailyReportDate = date;
         this.dailyArticleIds = articles.map((article) => article.id);
         this.dailyLoading = true;
         this.dailyReport = "";
+        this.dailyProgress = "";
         this.render();
+        const abort = new AbortController();
+        this.dailyAbort?.abort();
+        this.dailyAbort = abort;
+        const dailyPrompt = { ...DAILY_REPORT_PROMPT, ...(this.ai.getPrompt(DAILY_REPORT_PROMPT.id) || {}) };
+        const fakeArticle = {
+            id: `daily_${date}`,
+            subscriptionId: "",
+            title: `${displayDate(date)} AI 日报`,
+            link: "",
+            pubDate: Date.now(),
+            fetchedAt: Date.now(),
+            content: "",
+            description: "",
+            isRead: true,
+            isStarred: false,
+        } as Article;
         try {
-            let full = "";
-            const fakeArticle = {
-                id: `daily_${date}`,
-                subscriptionId: "",
-                title: `${displayDate(date)} AI 日报`,
-                link: "",
-                pubDate: Date.now(),
-                fetchedAt: Date.now(),
-                content: "",
-                description: "",
-                isRead: true,
-                isStarred: false,
-            } as Article;
-            const dailyPrompt = { ...DAILY_REPORT_PROMPT, ...(this.ai.getPrompt(DAILY_REPORT_PROMPT.id) || {}) };
-            await this.ai.streamRenderedTemplate(fakeArticle, dailyPrompt, this.buildDailyPrompt(date, articles), {
-                onChunk: (chunk) => {
-                    full += chunk;
-                    this.dailyReport = full;
+            // 阶段一：全景扫描（超长自动分块）
+            const meta = articles.map((a) => ({
+                id: a.id,
+                title: a.title || "",
+                source: this.storage.getSub(a.subscriptionId)?.name || "未知",
+                category: this.dailyCategoryName(a),
+            }));
+            const chunks = splitPanoramaArticles(meta);
+            const panoramaParts: string[] = [];
+            const picked: Article[] = [];
+            for (let ci = 0; ci < chunks.length; ci++) {
+                if (abort.signal.aborted) return;
+                this.dailyProgress = `阶段 1/2：全景扫描（${ci + 1}/${chunks.length} 块 · 共 ${articles.length} 篇）`;
+                this.render();
+                const { prompt } = buildPanoramaPrompt(date, chunks[ci]);
+                let part = "";
+                const text = await this.callDailyOnce(fakeArticle, dailyPrompt, prompt, abort.signal, (chunk) => {
+                    part += chunk;
+                    this.dailyReport = [...panoramaParts, part].join("\n\n---\n\n");
                     this.updateDailyReport();
-                },
-                onDone: (final) => {
-                    this.dailyReport = final || full;
+                });
+                if (!text.trim()) {
+                    this.dailyReport = "生成失败：全景扫描未返回内容";
                     this.dailyLoading = false;
+                    this.dailyAbort = null;
+                    this.dailyProgress = "";
                     this.render();
-                },
-                onError: (err) => {
-                    this.dailyLoading = false;
-                    this.dailyReport = `生成失败：${err.message}`;
+                    return;
+                }
+                const stripped = stripSelectionSection(text);
+                panoramaParts.push(cfg.showLinks ? mapChunkCitations(stripped, chunks[ci]) : stripCitationMarkers(stripped));
+                this.dailyReport = panoramaParts.join("\n\n---\n\n");
+                this.render();
+                selectTopArticles(text, chunks[ci], cfg.topN).forEach((m) => {
+                    const a = articles.find((x) => x.id === m.id);
+                    if (a && !picked.some((x) => x.id === a.id)) picked.push(a);
+                });
+            }
+            const panorama = panoramaParts.join("\n\n---\n\n");
+            // 阶段二：重点文章分批深读（受限并发）
+            let deepBatches: DeepBatchResult[] = [];
+            const skipped: string[] = [];
+            if (needDeep && picked.length) {
+                const batches = buildDeepDiveBatches(picked, cfg.batchSize);
+                const results = await runWithConcurrency(batches, cfg.concurrency, async (batch, bi) => {
+                    if (abort.signal.aborted) throw new Error("AbortError");
+                    this.dailyProgress = `阶段 2/2：深读重点文章 ${bi + 1}/${batches.length}（共 ${picked.length} 篇）`;
                     this.render();
-                    toast("AI 日报生成失败：" + err.message, "error", 5000);
-                },
-            });
+                    const deepBatch: DeepDiveArticle[] = batch.map((a) => ({
+                        id: a.id,
+                        title: a.title || "",
+                        source: this.storage.getSub(a.subscriptionId)?.name || "未知",
+                        category: this.dailyCategoryName(a),
+                        link: a.link || "",
+                        description: a.description || a.content || "",
+                    }));
+                    let text = "";
+                    try {
+                        text = await this.callDailyOnce(fakeArticle, dailyPrompt, buildDeepDivePrompt(date, deepBatch, bi), abort.signal);
+                    } catch (e) {
+                        if (abort.signal.aborted) throw e;
+                        skipped.push(...batch.map((a) => a.id));
+                        return { articles: batch, markdown: "" };
+                    }
+                    if (!text.trim()) {
+                        skipped.push(...batch.map((a) => a.id));
+                        return { articles: batch, markdown: "" };
+                    }
+                    return { articles: batch, markdown: normalizeDeepBatchMarkdown(text, batch) };
+                });
+                deepBatches = results;
+            }
+            if (abort.signal.aborted) return;
+            this.dailyReport = composeFinalReport(panorama, deepBatches, { skipped });
+            if (!this.dailyReport.trim()) this.dailyReport = "生成结果为空，请重新生成（AI 未返回任何内容）";
+            this.dailyLoading = false;
+            this.dailyAbort = null;
+            this.dailyProgress = "";
+            this.render();
+            const provider = this.ai.defaultProvider();
+            this.storage.saveDailyReport(date, {
+                markdown: this.dailyReport,
+                articleIds: this.dailyArticleIds,
+                generatedAt: Date.now(),
+                providerId: provider?.id,
+                model: provider?.model,
+                scope,
+                mode: cfg.mode,
+                articleHash: hash,
+                panorama,
+                selectedIds: picked.map((a) => a.id),
+                deepDives: Object.fromEntries(deepBatches.flatMap((b) => b.articles.map((a) => [a.id, b.markdown]))),
+                showLinks: cfg.showLinks,
+                version: 2,
+            }).catch((e) => console.error("[ai-rss] save daily report", e));
         } catch (e) {
             this.dailyLoading = false;
-            this.dailyReport = `生成失败：${(e as Error).message}`;
+            this.dailyAbort = null;
+            this.dailyProgress = "";
+            if (abort.signal.aborted || (e as Error).name === "AbortError") {
+                if (!this.dailyReport) this.dailyReport = "已停止生成";
+                toast("已停止生成", "info", 2000);
+            } else {
+                this.dailyReport = `生成失败：${(e as Error).message}`;
+                toast("AI 日报生成失败：" + (e as Error).message, "error", 5000);
+            }
             this.render();
         }
     }
@@ -2039,6 +2426,27 @@ class Reader {
         this.runQuickPrompt(a, effectivePrompt);
     }
 
+    private effectivePrompt(pid: string): PromptTemplate {
+        const base = QUICK_AI_PROMPTS.find((p) => p.id === pid);
+        const saved = this.ai.getPrompt(pid);
+        return saved ? { ...(base || saved), ...saved } : (base as PromptTemplate);
+    }
+
+    private rerollQuickPrompt(a: Article, prompt: PromptTemplate) {
+        this.mode = "article";
+        if (prompt.id === SUMMARY_PROMPT.id) this.summaryVisible = true;
+        this.render();
+        this.runQuickPrompt(a, prompt);
+    }
+
+    private rerollTranslation(a: Article) {
+        if (a.aiResults) delete a.aiResults[TRANSLATE_PROMPT.id];
+        this.translationVisible = true;
+        this.render();
+        const effective = this.effectivePrompt(TRANSLATE_PROMPT.id);
+        this.runTranslationPrompt(a, effective);
+    }
+
     updateTranslationProgress(stage: HTMLElement, progress: number) {
         const normalized = Math.max(0, Math.min(progress, 1));
         stage.style.setProperty("--ar-translate-progress", String(normalized));
@@ -2049,6 +2457,7 @@ class Reader {
         clear(status);
         if (spinning) status.appendChild(spinner(12));
         status.appendChild(el("span", {}, [text]));
+        if (spinning && this.translationStopBtn) status.appendChild(this.translationStopBtn);
     }
 
     renderAI(c: HTMLElement, a: Article) {
@@ -2095,8 +2504,11 @@ class Reader {
             ]),
             el("div", { class: "ar-rd__ai-card-body", html: mdToHtml(r.content) }),
             el("div", { class: "ar-rd__ai-card-foot" }, [
-                button({ variant: "ghost", size: "xs", icon: "copy", text: "复制", onclick: () => { navigator.clipboard.writeText(r.content); toast("已复制", "success"); } }),
-                button({ variant: "primary", size: "xs", icon: "save", text: "附加到思源", onclick: () => saveToSiyuan(a, this.storage.getSettings(), { [pid]: r }).then((id) => { if (id) this.storage.setSaved(a.id, id); }) }),
+                button({ variant: "secondary", size: "xs", icon: "refresh", text: pid === TRANSLATE_PROMPT.id ? "重新翻译" : "重新生成", onclick: () => {
+                    if (pid === TRANSLATE_PROMPT.id) this.rerollTranslation(a);
+                    else this.rerollQuickPrompt(a, this.effectivePrompt(pid));
+                } }),
+                button({ variant: "primary", size: "xs", icon: "save", text: "附加到思源", onclick: () => saveToSiyuan(a, this.storage.getSettings(), { [pid]: r }, this.storage.getSub(a.subscriptionId), this.savePathMemory()).then((id) => { if (id) this.storage.setSaved(a.id, id); }) }),
             ]),
         ]);
     }
@@ -2171,18 +2583,29 @@ class Reader {
         const target = inlineTarget || (this.contentArea?.querySelector(".ar-rd__ai-results") as HTMLElement) || el("div");
         target.querySelector(`[data-prompt-id="${prompt.id}"]`)?.remove();
 
+        const abort = new AbortController();
+        this.aiAbort?.abort();
+        this.aiAbort = abort;
+        const stopBtn = button({ variant: "ghost", size: "xs", icon: "stop", text: "停止", onclick: () => abort.abort() });
         const card = el("div", { class: "ar-rd__ai-card ar-rd__ai-card--stream", dataset: { promptId: prompt.id } }, [
             el("div", { class: "ar-rd__ai-card-head" }, [
                 el("span", {}, [makeIcon(prompt.icon || "sparkle", 14)]),
                 el("span", {}, [prompt.name]),
                 el("span", { style: { flex: "1" } }),
                 el("span", { class: "ar-rd__ai-streaming" }, [spinner(12), " 生成中…"]),
+                stopBtn,
             ]),
             el("div", { class: "ar-rd__ai-card-body" }, []),
         ]);
         target.insertBefore(card, target.firstChild);
         const body = card.querySelector(".ar-rd__ai-card-body") as HTMLElement;
         const head = card.querySelector(".ar-rd__ai-card-head") as HTMLElement;
+        let closeAdded = false;
+        const addCloseBtn = () => {
+            if (closeAdded) return;
+            closeAdded = true;
+            head.appendChild(button({ variant: "secondary", size: "xs", icon: "close", text: "关闭", className: "ar-ai-card-close", onclick: () => card.remove() }));
+        };
 
         try {
             let full = "";
@@ -2194,6 +2617,8 @@ class Reader {
                 onDone: async (final) => {
                     body.innerHTML = mdToHtml(final);
                     head.querySelector(".ar-rd__ai-streaming")?.remove();
+                    stopBtn.remove();
+                    this.aiAbort = null;
                     a.aiResults = a.aiResults || {};
                     a.aiResults[prompt.id] = r;
                     await this.storage.setAIResult(a.id, prompt.id, r);
@@ -2201,13 +2626,28 @@ class Reader {
                 },
                 onError: (err) => {
                     head.querySelector(".ar-rd__ai-streaming")?.remove();
-                    body.innerHTML = `<div style="color: var(--ar-error)">${escapeHtml(err.message)}</div>`;
-                    toast("AI 调用失败：" + err.message, "error", 5000);
+                    stopBtn.remove();
+                    this.aiAbort = null;
+                    if (abort.signal.aborted || err.name === "AbortError") {
+                        body.innerHTML = `<div style="color: var(--ar-text-tertiary)">已停止生成</div>`;
+                    } else {
+                        body.innerHTML = `<div style="color: var(--ar-error)">${escapeHtml(err.message)}</div>`;
+                        toast("AI 调用失败：" + err.message, "error", 5000);
+                    }
+                    addCloseBtn();
                 },
+                signal: abort.signal,
             });
         } catch (e) {
             head.querySelector(".ar-rd__ai-streaming")?.remove();
-            body.innerHTML = `<div style="color: var(--ar-error)">${escapeHtml((e as Error).message)}</div>`;
+            stopBtn.remove();
+            this.aiAbort = null;
+            if (abort.signal.aborted || (e as Error).name === "AbortError") {
+                body.innerHTML = `<div style="color: var(--ar-text-tertiary)">已停止生成</div>`;
+            } else {
+                body.innerHTML = `<div style="color: var(--ar-error)">${escapeHtml((e as Error).message)}</div>`;
+            }
+            addCloseBtn();
         }
     }
 
@@ -2218,6 +2658,10 @@ class Reader {
         const status = stage?.querySelector(".ar-rd__translate-status") as HTMLElement | null;
         const source = stage?.querySelector(".ar-rd__translate-source") as HTMLElement | null;
         if (!stage || !source) return;
+
+        const abort = new AbortController();
+        const stopBtn = button({ variant: "ghost", size: "xs", icon: "stop", text: "停止", onclick: () => abort.abort() });
+        this.translationStopBtn = stopBtn;
 
         try {
             let finalHtml = "";
@@ -2270,9 +2714,14 @@ class Reader {
                     },
                     onError: (err) => {
                         status?.classList.add("ar-rd__translate-status--error");
-                        this.setTranslationStatus(status, "翻译失败", false);
-                        toast("AI 翻译失败：" + err.message, "error", 5000);
+                        if (abort.signal.aborted || err.name === "AbortError") {
+                            this.setTranslationStatus(status, "已停止", false);
+                        } else {
+                            this.setTranslationStatus(status, "翻译失败", false);
+                            toast("AI 翻译失败：" + err.message, "error", 5000);
+                        }
                     },
+                    signal: abort.signal,
                 });
                 finalResult = r;
             }
@@ -2293,20 +2742,30 @@ class Reader {
                         },
                         onError: (err) => {
                             status?.classList.add("ar-rd__translate-status--error");
-                            this.setTranslationStatus(status, "翻译失败", false);
-                            toast("AI 翻译失败：" + err.message, "error", 5000);
+                            if (abort.signal.aborted || err.name === "AbortError") {
+                                this.setTranslationStatus(status, "已停止", false);
+                            } else {
+                                this.setTranslationStatus(status, "翻译失败", false);
+                                toast("AI 翻译失败：" + err.message, "error", 5000);
+                            }
                         },
+                        signal: abort.signal,
                     });
                     finalResult = r;
                 }
             }
+            if (abort.signal.aborted) return;
             this.updateTranslationProgress(stage, 1);
             status?.classList.add("ar-rd__translate-status--done");
             this.setTranslationStatus(status, "翻译完成", false);
+            this.translationStopBtn = null;
+            stopBtn.remove();
             finalHtml = translatedHtmlFromSource(source);
             finalTitle = translatedTextFromSegment(this.root, 1);
             const remaining = missing().length;
             if (remaining) {
+                this.translationStopBtn = null;
+                stopBtn.remove();
                 status?.classList.remove("ar-rd__translate-status--done");
                 status?.classList.add("ar-rd__translate-status--error");
                 this.setTranslationStatus(status, `仍有 ${remaining} 段未完成，请重试`, false);
@@ -2321,8 +2780,14 @@ class Reader {
                 setTimeout(() => this.render(), 420);
             }
         } catch (e) {
+            this.translationStopBtn = null;
+            stopBtn.remove();
             status?.classList.add("ar-rd__translate-status--error");
-            this.setTranslationStatus(status, "翻译失败", false);
+            if (abort.signal.aborted || (e as Error).name === "AbortError") {
+                this.setTranslationStatus(status, "已停止", false);
+            } else {
+                this.setTranslationStatus(status, "翻译失败", false);
+            }
         }
     }
 
@@ -2408,11 +2873,20 @@ export class RssTab {
     private autoRefreshTimer?: number;
     private refreshInterval?: number;
     private refreshDoneTimer?: number;
+    private isDock = false;
+    private dockView: "side" | "list" | "reader" = "side";
+    private dockScroll: { side: number; list: number; reader: number } = { side: 0, list: 0, reader: 0 };
+    private sideEl!: HTMLElement;
+    private listEl!: HTMLElement;
+    private readerEl!: HTMLElement;
 
     constructor(root: HTMLElement, storage: Storage, ai: AIService) {
         this.root = root;
         this.storage = storage;
         this.ai = ai;
+        // 手机/窄容器自动启用单视图模式（与 dock 一致）
+        this.isDock = this.root.classList.contains("ar-tab-root--dock") || this.root.clientWidth < 560;
+        if (this.isDock) this.root.classList.add("ar-tab-root--dock");
         this.root.classList.add("ar-tab");
         this.root.innerHTML = "";
         applyDisplaySettings(this.storage.getSettings());
@@ -2420,14 +2894,26 @@ export class RssTab {
         const sideEl = el("div", { class: "ar-side" });
         const listEl = el("div", { class: "ar-list" });
         const readerEl = el("div", { class: "ar-rd" });
-        this.root.appendChild(sideEl);
-        this.root.appendChild(listEl);
-        this.root.appendChild(readerEl);
+        this.sideEl = sideEl;
+        this.listEl = listEl;
+        this.readerEl = readerEl;
+        if (this.isDock) {
+            const body = el("div", { class: "ar-dock-body" });
+            body.appendChild(sideEl);
+            body.appendChild(listEl);
+            body.appendChild(readerEl);
+            this.root.appendChild(body);
+        } else {
+            this.root.appendChild(sideEl);
+            this.root.appendChild(listEl);
+            this.root.appendChild(readerEl);
+        }
 
         this.sidebar = new Sidebar(sideEl, storage, (id) => {
             this.list.setActive(id);
             this.list.setActiveArticle(null);
             if (id !== "daily") this.reader.showArticle(null);
+            if (this.isDock) this.switchDockView("list");
         });
         (this.sidebar as any)._ai = ai;  // 注入 ai 给设置
         (this.sidebar as any).onRefresh = (id: string, options?: { silent?: boolean }) => this.refreshOne(id, options);
@@ -2436,6 +2922,7 @@ export class RssTab {
             this.reader.showArticle(article);
             if (article && !article.isRead) this.storage.setRead(article.id, true);
             this.list.setActiveArticle(id, { center: options.centerInList });
+            if (this.isDock) this.switchDockView("reader");
         };
         const openAdjacentArticle = (currentId: string, direction: "prev" | "next") => {
             const article = this.list.getAdjacentArticle(currentId, direction);
@@ -2455,12 +2942,37 @@ export class RssTab {
             listEl,
             storage,
             openArticle,
-            (date) => this.reader.showDaily(date),
-            (date) => this.reader.generateDailyReport(date),
-            () => this.refreshAll(),
-            (ids) => this.markCurrentListRead(ids),
+            (date) => {
+                this.reader.showDaily(date);
+                if (this.isDock) this.switchDockView("reader");
+            },
+            (date, force, scopes) => { this.reader.generateDailyReport(date, { force: !!force, scope: scopes }); },
+            () => { this.refreshAll(); },
+            (ids) => { this.markCurrentListRead(ids); },
+            () => this.isDock && this.dockView === "list" ? this.makeDockBackBtn() : null,
         );
-        this.reader = new Reader(readerEl, storage, ai, openArticleFromDaily, openAdjacentArticle, (currentId, direction) => this.list.getAdjacentArticle(currentId, direction));
+        this.reader = new Reader(readerEl, storage, ai, openArticleFromDaily, openAdjacentArticle, (currentId, direction) => this.list.getAdjacentArticle(currentId, direction), () => this.isDock ? this.makeDockBackBtn() : null);
+
+        // dock 模式：底部单视图切换（含「完整界面」入口），返回按钮嵌入各视图头部
+        if (this.isDock) {
+            const nav = el("div", { class: "ar-dock-nav" });
+            ([["side", "订阅", "rss"], ["list", "文章", "list"], ["reader", "阅读", "article"]] as const).forEach(([view, label, ic]) => {
+                nav.appendChild(el("button", {
+                    class: `ar-dock-nav__item ${this.dockView === view ? "ar-dock-nav__item--active" : ""}`,
+                    type: "button",
+                    dataset: { dockView: view },
+                    onclick: () => this.switchDockView(view),
+                }, [makeIcon(ic, 14), el("span", {}, [label])]));
+            });
+            nav.appendChild(el("button", {
+                class: "ar-dock-nav__item ar-dock-nav__item--full",
+                type: "button",
+                title: "在完整界面打开",
+                onclick: () => (window as any).__ai_rss__?.openFullTab?.(),
+            }, [makeIcon("external", 14), el("span", {}, ["完整"])]));
+            this.root.appendChild(nav);
+            this.applyDockView();
+        }
 
         this.storage.cleanupExpiredArticles();
 
@@ -2473,6 +2985,12 @@ export class RssTab {
         if (interval > 0) {
             this.refreshInterval = window.setInterval(() => this.refreshAll({ silent: true }), interval * 60_000);
         }
+
+        // 横向滚动容器内滑动不冒泡到外层，避免手机端误触导致界面划出
+        this.root.addEventListener("touchmove", (ev) => {
+            const t = (ev.target as HTMLElement)?.closest?.(".ar-rd__table-scroll, .ar-rd__body pre");
+            if (t && t.scrollWidth > t.clientWidth + 2) ev.stopPropagation();
+        }, { passive: true });
     }
 
     destroy() {
@@ -2482,6 +3000,57 @@ export class RssTab {
         this.autoRefreshTimer = undefined;
         this.refreshInterval = undefined;
         this.refreshDoneTimer = undefined;
+    }
+
+    private saveDockScroll(view: "side" | "list" | "reader") {
+        if (view === "side") {
+            this.dockScroll.side = this.sideEl.querySelector<HTMLElement>(".ar-side__section--feeds")?.scrollTop || 0;
+        } else if (view === "list") {
+            this.dockScroll.list = this.listEl.querySelector<HTMLElement>(".ar-list__items")?.scrollTop || 0;
+        } else {
+            this.dockScroll.reader = this.reader.contentArea?.scrollTop || 0;
+        }
+    }
+
+    private switchDockView(view: "side" | "list" | "reader") {
+        if (view === this.dockView) return;
+        this.saveDockScroll(this.dockView);
+        this.dockView = view;
+        this.applyDockView();
+        const restore = () => {
+            const el = view === "side"
+                ? this.sideEl.querySelector<HTMLElement>(".ar-side__section--feeds")
+                : view === "list"
+                    ? this.listEl.querySelector<HTMLElement>(".ar-list__items")
+                    : this.reader.contentArea;
+            if (el) el.scrollTop = this.dockScroll[view] || 0;
+        };
+        requestAnimationFrame(restore);
+        setTimeout(restore, 100);
+    }
+
+    /** Dock 返回上一级：阅读 → 文章列表 → 订阅 */
+    private dockBack() {
+        if (this.dockView === "reader") this.switchDockView("list");
+        else if (this.dockView === "list") this.switchDockView("side");
+    }
+
+    private makeDockBackBtn(): HTMLElement {
+        return button({ variant: "icon", size: "sm", icon: "chevronLeft", title: "返回上一级", className: "ar-dock-back", onclick: () => this.dockBack() });
+    }
+
+    private applyDockView() {
+        const set = (el: HTMLElement, on: boolean) => { el.style.display = on ? "" : "none"; };
+        set(this.sideEl, this.dockView === "side");
+        set(this.listEl, this.dockView === "list");
+        set(this.readerEl, this.dockView === "reader");
+        // 重渲染当前视图，让「返回上一级」按钮嵌入对应头部
+        if (this.dockView === "list") this.list.render();
+        else if (this.dockView === "reader") this.reader.render();
+        else this.sidebar.render();
+        this.root.querySelectorAll<HTMLElement>(".ar-dock-nav__item").forEach((b) => {
+            b.classList.toggle("ar-dock-nav__item--active", b.dataset.dockView === this.dockView);
+        });
     }
 
     private async markCurrentListRead(ids: string[]) {
@@ -2505,48 +3074,73 @@ export class RssTab {
     private async doRefresh(subs: Subscription[], options: { toast?: boolean } = {}) {
         if (this.refreshDoneTimer) window.clearTimeout(this.refreshDoneTimer);
         this.list?.setRefreshStatus("refreshing");
-        for (const sub of subs) {
-            try {
-                const f = await fetchAndParse(sub.url, this.storage.getSettings().general.rsshubBaseUrl);
-                if (!this.storage.getSub(sub.id)) continue;
-                const articles = f.articles.filter((a) => a.link).map((a) => ({
-                    id: articleId(sub.id, a.link),
-                    subscriptionId: sub.id,
-                    title: a.title, link: a.link, author: a.author,
-                    pubDate: a.pubDate, fetchedAt: Date.now(),
-                    content: a.content, description: a.description, thumbnail: a.thumbnail,
-                }));
-                const faviconInfo = await resolveSubscriptionFavicon({
-                    feedFavicon: f.favicon,
-                    existingFavicon: sub.favicon,
-                    existingTriedAt: sub.faviconTriedAt,
-                    siteUrl: f.siteUrl || sub.siteUrl || sub.url,
-                });
-                const faviconPatch: Partial<Subscription> = {
-                    siteUrl: f.siteUrl || sub.siteUrl,
-                    description: f.description || sub.description,
-                    lastFetchAt: Date.now(),
-                    lastError: undefined,
-                    errorCount: 0,
-                };
-                if (faviconInfo.favicon || !sub.favicon) {
-                    faviconPatch.favicon = faviconInfo.favicon || fallbackFavicon(f.siteUrl || sub.url);
+        const total = subs.length;
+        let index = 0;
+        let done = 0;
+        let lastProgressAt = 0;
+        const metaPatches: { id: string; patch: Partial<Subscription> }[] = [];
+        const allArticles: any[] = [];
+        const workerCount = Math.min(4, Math.max(1, total));
+        const workers = Array.from({ length: workerCount }, async () => {
+            while (index < total) {
+                const sub = subs[index++];
+                try {
+                    const f = await fetchAndParse(sub.url, this.storage.getSettings().general.rsshubBaseUrl);
+                    if (!this.storage.getSub(sub.id)) continue;
+                    f.articles.filter((a) => a.link).forEach((a) => {
+                        allArticles.push({
+                            id: articleId(sub.id, a.link),
+                            subscriptionId: sub.id,
+                            title: a.title, link: a.link, author: a.author,
+                            pubDate: a.pubDate, fetchedAt: Date.now(),
+                            content: a.content, description: a.description, thumbnail: a.thumbnail,
+                        });
+                    });
+                    const faviconPatch: Partial<Subscription> = {
+                        siteUrl: f.siteUrl || sub.siteUrl,
+                        description: f.description || sub.description,
+                        lastFetchAt: Date.now(),
+                        lastError: undefined,
+                        errorCount: 0,
+                    };
+                    if (!sub.customFavicon) {
+                        const faviconInfo = await resolveSubscriptionFavicon({
+                            feedFavicon: f.favicon,
+                            existingFavicon: sub.favicon,
+                            existingTriedAt: sub.faviconTriedAt,
+                            siteUrl: f.siteUrl || sub.siteUrl || sub.url,
+                        });
+                        if (faviconInfo.favicon || !sub.favicon) {
+                            faviconPatch.favicon = faviconInfo.favicon || fallbackFavicon(f.siteUrl || sub.url);
+                        }
+                        if (faviconInfo.attempted) {
+                            faviconPatch.faviconTriedAt = faviconInfo.triedAt;
+                        }
+                    }
+                    metaPatches.push({ id: sub.id, patch: faviconPatch });
+                } catch (e) {
+                    const latest = this.storage.getSub(sub.id);
+                    if (latest) {
+                        metaPatches.push({ id: sub.id, patch: {
+                            lastFetchAt: Date.now(),
+                            lastError: (e as Error).message,
+                            errorCount: (latest.errorCount || 0) + 1,
+                        } });
+                    }
+                } finally {
+                    done++;
+                    const now = Date.now();
+                    if (done === total || now - lastProgressAt > 400) {
+                        lastProgressAt = now;
+                        this.list?.setRefreshStatus("refreshing", `正在刷新 ${done}/${total}`);
+                    }
                 }
-                if (faviconInfo.attempted) {
-                    faviconPatch.faviconTriedAt = faviconInfo.triedAt;
-                }
-                await this.storage.patchSubMeta(sub.id, faviconPatch);
-                await this.storage.upsertArticles(articles as any);
-            } catch (e) {
-                const latest = this.storage.getSub(sub.id);
-                if (!latest) continue;
-                await this.storage.patchSubMeta(sub.id, {
-                    lastFetchAt: Date.now(),
-                    lastError: (e as Error).message,
-                    errorCount: (latest.errorCount || 0) + 1,
-                });
             }
-        }
+        });
+        await Promise.all(workers);
+        // 批量落盘：订阅元数据一次、文章一次，减少序列化与重复渲染
+        await this.storage.patchSubsMeta(metaPatches);
+        await this.storage.upsertArticles(allArticles);
         this.list?.setRefreshStatus("done");
         this.refreshDoneTimer = window.setTimeout(() => {
             this.list?.setRefreshStatus("idle");

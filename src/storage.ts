@@ -4,7 +4,7 @@
  */
 
 import { Plugin } from "siyuan";
-import { Article, Category, Subscription, Settings, AISettings, KEYS, DEFAULT_SETTINGS, DEFAULT_AI } from "./types";
+import { Article, Category, DailyReportCache, Subscription, Settings, AISettings, KEYS, DEFAULT_SETTINGS, DEFAULT_AI } from "./types";
 
 const LEGACY_PLUGIN_STORAGE_DIRS = ["ai-rss"];
 
@@ -33,6 +33,7 @@ export class Storage {
     star: Set<string> = new Set();
     settings: Settings = DEFAULT_SETTINGS;
     ai: AISettings = DEFAULT_AI;
+    dailyReports: Record<string, DailyReportCache> = {};
 
     listeners: Set<() => void> = new Set();
 
@@ -51,7 +52,7 @@ export class Storage {
     }
 
     private async load() {
-        const [s, c, a, r, st, sg, ai] = await Promise.all([
+        const [s, c, a, r, st, sg, ai, dr] = await Promise.all([
             this.loadDataWithLegacyFallback(KEYS.subs),
             this.loadDataWithLegacyFallback(KEYS.cats),
             this.loadDataWithLegacyFallback(KEYS.articles),
@@ -59,6 +60,7 @@ export class Storage {
             this.loadDataWithLegacyFallback(KEYS.star),
             this.loadDataWithLegacyFallback(KEYS.settings),
             this.loadDataWithLegacyFallback(KEYS.ai),
+            this.loadDataWithLegacyFallback(KEYS.dailyReports),
         ]);
         const subStore = this.normalizeSubStore(s);
         this.subs = subStore.items;
@@ -85,10 +87,15 @@ export class Storage {
             };
         }
         if (ai && typeof ai === "object") this.ai = { ...DEFAULT_AI, ...ai };
+        if (dr && typeof dr === "object" && !Array.isArray(dr)) {
+            this.dailyReports = dr as Record<string, DailyReportCache>;
+        }
         for (const a of this.articles.values()) {
             a.isRead = this.read.has(a.id);
             a.isStarred = this.star.has(a.id);
         }
+        // 数据加载完成后通知已挂载的 UI 刷新（首次进入时 Tab 可能先于数据就绪渲染）
+        this.emit();
     }
 
     private async loadDataWithLegacyFallback(key: string): Promise<any> {
@@ -318,6 +325,15 @@ export class Storage {
     async patchSubMeta(id: string, patch: Partial<Subscription>) {
         await this.commitSubs((items) => items.map((sub) => sub.id === id ? { ...sub, ...patch, id: sub.id, url: sub.url, updatedAt: Date.now() } : sub));
     }
+    /** 批量更新多个订阅的元数据，只落盘一次并触发一次渲染 */
+    async patchSubsMeta(list: { id: string; patch: Partial<Subscription> }[]) {
+        if (!list.length) return;
+        const now = Date.now();
+        await this.commitSubs((items) => items.map((sub) => {
+            const p = list.find((x) => x.id === sub.id);
+            return p ? { ...sub, ...p.patch, id: sub.id, url: sub.url, updatedAt: now } : sub;
+        }));
+    }
     async bulkImportSubs(list: Subscription[]) {
         const added: Subscription[] = [];
         await this.commitSubs((items) => {
@@ -472,11 +488,35 @@ export class Storage {
     }
     async cleanupExpiredArticles() {
         const removed = this.pruneExpiredArticles(false);
-        if (!removed) return 0;
+        let dailyRemoved = 0;
+        const cutoff = Date.now() - 30 * 86400_000;
+        for (const [date, report] of Object.entries(this.dailyReports)) {
+            if (!report?.generatedAt || report.generatedAt < cutoff) {
+                delete this.dailyReports[date];
+                dailyRemoved++;
+            }
+        }
+        if (!removed && !dailyRemoved) return 0;
         await this.save(KEYS.read, Array.from(this.read));
         await this.save(KEYS.articles, Array.from(this.articles.values()));
+        if (dailyRemoved) await this.save(KEYS.dailyReports, this.dailyReports);
         this.emit();
         return removed;
+    }
+
+    getDailyReport(date: string): DailyReportCache | undefined {
+        return this.dailyReports[date];
+    }
+    async saveDailyReport(date: string, report: DailyReportCache) {
+        this.dailyReports = { ...this.dailyReports, [date]: report };
+        await this.save(KEYS.dailyReports, this.dailyReports);
+    }
+    async removeDailyReport(date: string) {
+        if (!this.dailyReports[date]) return;
+        const next = { ...this.dailyReports };
+        delete next[date];
+        this.dailyReports = next;
+        await this.save(KEYS.dailyReports, this.dailyReports);
     }
     async setRead(id: string, v: boolean) {
         const a = this.articles.get(id); if (!a) return;

@@ -61,6 +61,21 @@ export class AIService {
         };
     }
 
+    /** 非流式渲染调用（用于流式返回为空时的降级重试） */
+    async chatRendered(tpl: PromptTemplate, renderedPrompt: string, providerId?: string): Promise<AIResult> {
+        const p = this.resolveProvider(providerId);
+        if (!p) throw new Error("no AI provider configured");
+        const messages: any[] = [];
+        if (tpl.systemPrompt) messages.push({ role: "system", content: tpl.systemPrompt });
+        messages.push({ role: "user", content: renderedPrompt });
+        const start = Date.now();
+        const r = await callProvider(p, messages, false);
+        return {
+            promptId: tpl.id, promptName: tpl.name, content: r.content, model: r.model,
+            providerId: p.id, usage: r.usage, generatedAt: Date.now(), durationMs: Date.now() - start,
+        };
+    }
+
     /** 流式 - 实时回调 */
     async stream(article: Article, promptId: string,
         cb: { onChunk: (s: string) => void; onDone: (full: string, usage?: any) => void; onError: (e: Error) => void; signal?: AbortSignal },

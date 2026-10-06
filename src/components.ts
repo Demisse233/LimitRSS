@@ -107,7 +107,7 @@ export function modal(opt: ModalOpt): { close: () => void; setTitle: (t: string)
     const body = el("div", { class: "ar-modal__body" }, [opt.content]);
     const dialog = el("div", {
         class: `ar-modal__dialog ${opt.dialogClassName || ""}`.trim(),
-        style: { width: opt.width, maxWidth: opt.width || "560px" },
+        style: { width: opt.width },
     }, [header, body]);
     if (opt.footer && opt.footer.length) {
         const f = el("div", { class: "ar-modal__footer" });
@@ -116,6 +116,22 @@ export function modal(opt: ModalOpt): { close: () => void; setTitle: (t: string)
     }
     const backdrop = el("div", { class: "ar-modal__backdrop" }, [dialog]);
     backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+    // 移动端：modal 内触摸事件不冒泡到主界面（防止左滑 dock/页面手势被触发）
+    backdrop.addEventListener("touchstart", (e) => {
+        const t = e.target as HTMLElement;
+        const horizontal = t?.closest?.(".ar-settings__nav, .ar-favicon-emoji, .ar-doc-picker, .ar-scope-panel");
+        if (!horizontal) e.stopPropagation();
+    }, { passive: true });
+    // 移动端：modal 内滑动不穿透主界面；可滚动容器放行，其余阻止默认滚动
+    backdrop.addEventListener("touchmove", (e) => {
+        const t = e.target as HTMLElement;
+        const scroller = t?.closest?.(".ar-settings__nav, .ar-favicon-emoji, .ar-scope-panel, .ar-doc-picker, .ar-sel-search, .ar-preview-wrap, .ar-modal__body, .ar-sub-manage, .ar-prompts, .ar-settings__section--subscriptions");
+        if (scroller && (scroller.scrollWidth > scroller.clientWidth || scroller.scrollHeight > scroller.clientHeight)) {
+            e.stopPropagation();
+            return;
+        }
+        e.preventDefault();
+    }, { passive: false });
     const esc = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
     document.addEventListener("keydown", esc);
     document.body.appendChild(backdrop);
@@ -133,6 +149,7 @@ export function modal(opt: ModalOpt): { close: () => void; setTitle: (t: string)
 export interface DropdownItem {
     label: string;
     icon?: string;
+    active?: boolean;
     danger?: boolean;
     disabled?: boolean;
     onClick?: () => void;
@@ -150,7 +167,7 @@ export function dropdown(target: HTMLElement, items: DropdownItem[], width = "18
     for (const it of items) {
         if (it.divider) { menu.appendChild(el("div", { class: "ar-drop__sep" })); continue; }
         menu.appendChild(el("button", {
-            class: `ar-drop__item ${it.danger ? "ar-drop__item--danger" : ""}`,
+            class: `ar-drop__item ${it.danger ? "ar-drop__item--danger" : ""} ${it.active ? "ar-drop__item--active" : ""}`,
             disabled: it.disabled,
             onclick: () => { closeDrop(); it.onClick?.(); },
         }, [

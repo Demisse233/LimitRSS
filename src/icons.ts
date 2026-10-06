@@ -229,3 +229,71 @@ export function iconText(iconName: string, text?: string, size = 14): HTMLElemen
     if (text) span.appendChild(document.createTextNode(text));
     return span;
 }
+
+/**
+ * 渲染思源笔记本/文档图标：emoji 直接显示，内置图标名（iconXXX）用全局 sprite 渲染。
+ * 无法识别时回退到默认 emoji。
+ */
+export function siyuanIconEl(icon: string | undefined, fallback = "📘"): HTMLElement {
+    const span = document.createElement("span");
+    span.className = "ar-nb-icon";
+    const value = (icon || "").trim();
+    if (!value) {
+        span.textContent = fallback;
+        return span;
+    }
+    if (/^icon[A-Za-z]/.test(value)) {
+        if (document.querySelector(`#${value}`)) {
+            const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+            svg.setAttribute("class", "b3-icon");
+            svg.setAttribute("aria-hidden", "true");
+            const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+            use.setAttribute("xlink:href", `#${value}`);
+            use.setAttribute("href", `#${value}`);
+            svg.appendChild(use);
+            span.appendChild(svg);
+            return span;
+        }
+        // sprite 中不存在该内置图标时回退，不显示原始代码
+        span.textContent = fallback;
+        return span;
+    }
+    // 纯 ASCII（如旧数据残留的 icon 代码）直接回退；含 emoji/非 ASCII 才按文本显示
+    span.textContent = Array.from(value).some((ch) => ch.charCodeAt(0) > 255) ? value : fallback;
+    return span;
+}
+
+/**
+ * 渲染订阅源图标：图片（URL/dataURL）用 <img>，emoji 按文本显示，空值回退 RSS 图标。
+ * 统一处理自定义 emoji 图标与失效图片的兜底。
+ */
+export function renderFavicon(value: string | undefined, className: string, fallbackSize = 13): HTMLElement {
+    const wrap = document.createElement("span");
+    wrap.className = className;
+    const v = (value || "").trim();
+    if (/^data:image\//.test(v) || /^https?:/i.test(v)) {
+        const img = document.createElement("img");
+        img.src = v;
+        img.alt = "";
+        img.addEventListener("error", () => {
+            clearFaviconFallback(wrap);
+        }, { once: true });
+        wrap.appendChild(img);
+        return wrap;
+    }
+    if (v) {
+        // emoji / 其他文本
+        wrap.classList.add("ar-favicon-emoji-mark");
+        wrap.textContent = v;
+        return wrap;
+    }
+    wrap.classList.add(className + "--fallback");
+    wrap.appendChild(icon("rss", fallbackSize));
+    return wrap;
+}
+
+function clearFaviconFallback(wrap: HTMLElement) {
+    while (wrap.firstChild) wrap.removeChild(wrap.firstChild);
+    wrap.classList.add("ar-favicon-fallback");
+    wrap.appendChild(icon("rss", 13));
+}
