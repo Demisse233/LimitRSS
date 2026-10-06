@@ -1,5 +1,7 @@
 # LimitRSS · 思源笔记 AI RSS 阅读器
 
+#支持开发者：https://afdian.com/a/LimitRSS
+
 > 打破信息获取与知识内化的壁垒。订阅、阅读、让 AI 帮你总结、翻译，把文章变成你的知识库。
 
 [English](./README.en.md) · [反馈问题](https://github.com/Demisse233/LimitRSS/issues) · [功能建议](https://github.com/Demisse233/LimitRSS/issues)
