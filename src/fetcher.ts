@@ -116,7 +116,7 @@ export async function fetchXML(url: string): Promise<string> {
         const { fetchSyncPost } = await import("siyuan");
         const r: any = await fetchSyncPost("/api/network/forwardProxy", {
             url, method: "GET", timeout: 30000,
-            headers: { "User-Agent": USER_AGENT },
+            headers: [{ "User-Agent": USER_AGENT }],
         });
         if (r.code === 0 && (r.data?.body || r.data?.status)) {
             return ensureFeedResponse(url, r.data.body, Number(r.data.status) || undefined);
@@ -302,7 +302,7 @@ async function probeImageUrl(url: string): Promise<boolean> {
         const { fetchSyncPost } = await import("siyuan");
         const r: any = await fetchSyncPost("/api/network/forwardProxy", {
             url, method: "GET", timeout: 10_000,
-            headers: { Range: "bytes=0-1023" },
+            headers: [{ Range: "bytes=0-1023" }],
         });
         if (r?.code === 0 && r?.data) {
             const status = Number(r.data.status) || 0;
@@ -397,7 +397,7 @@ async function fetchSiteHomeHtml(homeUrl: string): Promise<string | undefined> {
         const { fetchSyncPost } = await import("siyuan");
         const r: any = await fetchSyncPost("/api/network/forwardProxy", {
             url: homeUrl, method: "GET", timeout: 15000,
-            headers: { "User-Agent": "Mozilla/5.0 (compatible; SiYuan-AI-RSS/0.1)" },
+            headers: [{ "User-Agent": "Mozilla/5.0 (compatible; SiYuan-AI-RSS/0.1)" }],
         });
         if (r?.code === 0 && r?.data?.body) {
             const status = Number(r.data.status) || 0;

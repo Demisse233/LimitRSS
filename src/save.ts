@@ -3,50 +3,76 @@
  */
 
 import { Article, AIResult, Settings } from "./types";
+import { Storage } from "./storage";
 import { el } from "./ui";
 import { modal, button, toast } from "./components";
+import { buildSavePath, notebookIcon, normalizeSaveDir, sanitizePathSegment } from "./util";
 import { fetchSyncPost } from "siyuan";
 
-interface Notebook { id: string; name: string; icon?: string; closed?: boolean; }
+export interface Notebook { id: string; name: string; icon?: string; closed?: boolean; }
 
-export async function saveToSiyuan(article: Article, settings: Settings, aiResults: Record<string, AIResult> = {}) {
-    // 加载笔记本
-    let notebooks: Notebook[] = [];
+export async function listNotebooks(): Promise<Notebook[]> {
     try {
         const r: any = await fetchSyncPost("/api/notebook/lsNotebooks", {});
         if (r.code === 0 && r.data?.notebooks) {
-            notebooks = r.data.notebooks.filter((n: Notebook) => !n.closed);
+            return r.data.notebooks.filter((n: Notebook) => !n.closed);
         }
     } catch { /* ignore */ }
+    return [];
+}
+
+/**
+ * createDocWithMd 不会自动创建多级 hpath 的父文档；
+ * 保存到 /RSS/2026 这类目录前，需要逐级确认/创建父文档。
+ */
+async function ensureDirPath(notebook: string, dir: string) {
+    const parts = normalizeSaveDir(dir).split("/").filter(Boolean);
+    let current = "";
+    for (const part of parts) {
+        current += "/" + part;
+        const existing: any = await fetchSyncPost("/api/filetree/getIDsByHPath", { notebook, path: current });
+        if (existing?.code === 0 && Array.isArray(existing.data) && existing.data.length > 0) continue;
+        const created: any = await fetchSyncPost("/api/filetree/createDocWithMd", {
+            notebook,
+            path: current,
+            markdown: "",
+        });
+        if (created?.code !== 0) {
+            throw new Error(`创建目录「${part}」失败：${created?.msg || "未知错误"}`);
+        }
+        await fetchSyncPost("/api/sqlite/flushTransaction", {}).catch(() => {});
+    }
+}
+
+export async function saveToSiyuan(article: Article, storage: Storage, aiResults: Record<string, AIResult> = {}) {
+    const settings = storage.getSettings();
+    const notebooks = await listNotebooks();
     if (notebooks.length === 0) {
         toast("没有可用的笔记本", "error");
         return null;
     }
 
-    // 默认选中
-    const defaultNb = settings.save.template && (window as any).siyuan?.config
-        ? notebooks.find((n) => n.id === (settings as any).general?.defaultNotebook) || notebooks[0]
-        : notebooks[0];
+    const sub = storage.getSub(article.subscriptionId);
+    const sourceName = sub?.name || "";
+    const preferredNb = notebooks.find((n) => n.id === settings.save.defaultNotebookId) || notebooks[0];
+    const dirFor = (notebookId: string) =>
+        normalizeSaveDir(settings.save.pathsByNotebook?.[notebookId] ?? settings.save.defaultPath ?? "/");
 
-    let selectedNb = defaultNb.id;
-    let includeSummary = false;
-    let selectedAI: string[] = [];
     let downloadImages = settings.save.downloadImages;
     let includeLink = settings.save.includeSourceLink;
     let tags = (article.tags || []).join(", ");
 
-    const safeName = (s: string) => (s || "untitled")
-        .replace(/[/\\:*?"<>|]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 120) || "untitled";
-
-    const nameInput = el("input", { class: "ar-input", type: "text", value: safeName(article.title) });
+    const nameInput = el("input", { class: "ar-input", type: "text", value: (sanitizePathSegment(article.title) || "untitled").slice(0, 120) }) as HTMLInputElement;
     const nbSelect = el("select", { class: "ar-input" }) as HTMLSelectElement;
     notebooks.forEach((n) => {
-        const opt = el("option", { value: n.id, selected: n.id === selectedNb }, [`${n.icon || "📓"} ${n.name}`]);
-        nbSelect.appendChild(opt);
+        nbSelect.appendChild(el("option", { value: n.id, selected: n.id === preferredNb.id }, [`${notebookIcon(n.icon)} ${n.name}`]));
     });
+    const dirInput = el("input", {
+        class: "ar-input",
+        type: "text",
+        value: dirFor(preferredNb.id),
+        placeholder: "/ 或 /RSS/2026",
+    }) as HTMLInputElement;
     const linkCheck = el("input", { type: "checkbox" }) as HTMLInputElement; linkCheck.checked = includeLink;
     const imgCheck = el("input", { type: "checkbox" }) as HTMLInputElement; imgCheck.checked = downloadImages;
     const tagInput = el("input", { class: "ar-input", type: "text", value: tags, placeholder: "用逗号分隔" });
@@ -54,19 +80,19 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
 
     // AI 列表
     const aiKeys = Object.keys(aiResults);
+    const selectedAI: string[] = aiKeys.filter((pid) => pid === "quick_summary_paragraph" || pid === "p_summary");
     if (aiKeys.length === 0) {
         aiList.appendChild(el("div", { class: "ar-form__hint" }, ["本篇文章还没有 AI 总结"]));
     } else {
-        const summaryCb = el("input", { type: "checkbox" }) as HTMLInputElement;
-        summaryCb.checked = aiKeys.includes("quick_summary_paragraph") || aiKeys.includes("p_summary");
-        summaryCb.addEventListener("change", () => { includeSummary = summaryCb.checked; });
         aiKeys.forEach((pid) => {
             const r = aiResults[pid];
             const cb = el("input", { type: "checkbox" }) as HTMLInputElement;
-            cb.checked = pid === "quick_summary_paragraph" || pid === "p_summary";
+            cb.checked = selectedAI.includes(pid);
             cb.addEventListener("change", () => {
-                if (cb.checked) selectedAI.push(pid);
-                else selectedAI = selectedAI.filter((x) => x !== pid);
+                const index = selectedAI.indexOf(pid);
+                if (cb.checked && index < 0) selectedAI.push(pid);
+                if (!cb.checked && index >= 0) selectedAI.splice(index, 1);
+                updatePreview();
             });
             aiList.appendChild(el("label", { class: "ar-ai-item" }, [
                 cb, el("span", {}, [r.promptName]),
@@ -76,26 +102,38 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
     const previewEl = el("pre", { class: "ar-preview" });
 
     const updatePreview = () => {
-        const md = composeMd(article, settings, aiResults, selectedAI, nbSelect.value);
+        const md = composeMd(article, settings, aiResults, selectedAI, {
+            sourceName,
+            includeLink: linkCheck.checked,
+        });
         previewEl.textContent = md.slice(0, 1500) + (md.length > 1500 ? "\n…" : "");
     };
     setTimeout(updatePreview, 50);
-    [nameInput, nbSelect, linkCheck, imgCheck, tagInput].forEach((e) => {
+    [nameInput, dirInput, linkCheck, imgCheck, tagInput].forEach((e) => {
         e.addEventListener("change", updatePreview);
         e.addEventListener("input", updatePreview);
     });
+    nbSelect.addEventListener("change", () => {
+        dirInput.value = dirFor(nbSelect.value);
+        updatePreview();
+    });
 
     const doSave = async () => {
-        const md = composeMd(article, settings, aiResults, selectedAI, nbSelect.value);
+        const markdown = composeMd(article, settings, aiResults, selectedAI, {
+            sourceName,
+            includeLink: linkCheck.checked,
+        });
         const tags2 = (tagInput as HTMLInputElement).value.split(",").map((s) => s.trim()).filter(Boolean);
+        const dir = normalizeSaveDir(dirInput.value);
         const saveBtn = dialog.container.querySelector(".ar-save-btn") as HTMLButtonElement;
         saveBtn.disabled = true;
         saveBtn.textContent = "保存中…";
         try {
+            await ensureDirPath(nbSelect.value, dir);
             const r: any = await fetchSyncPost("/api/filetree/createDocWithMd", {
                 notebook: nbSelect.value,
-                path: "/" + ((nameInput as HTMLInputElement).value || safeName(article.title)),
-                markdown: md,
+                path: buildSavePath(dir, nameInput.value || article.title),
+                markdown,
             });
             if (r.code !== 0 || !r.data) {
                 throw new Error(r.msg || "创建文档失败");
@@ -103,17 +141,23 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
             const docId = r.data as string;
             await fetchSyncPost("/api/sqlite/flushTransaction", {}).catch(() => {});
             if (imgCheck.checked) {
-                await fetchSyncPost("/api/format/netImg2LocalAssets", { id: docId, url: article.link || "" }).catch(() => {});
+                await fetchSyncPost("/api/format/netImg2LocalAssets", { id: docId }).catch(() => {});
             }
-            if (tags2.length > 0) {
-                await fetchSyncPost("/api/attr/setBlockAttrs", {
-                    id: docId,
-                    attrs: {
-                        "custom-ai-rss-tags": tags2.join(","),
-                        "custom-ai-rss-link": article.link || "",
-                    },
-                }).catch(() => {});
+            const attrs: Record<string, string> = {};
+            if (article.link) attrs["custom-ai-rss-link"] = article.link;
+            if (sourceName) attrs["custom-ai-rss-source"] = sourceName;
+            if (tags2.length) attrs["custom-ai-rss-tags"] = tags2.join(",");
+            if (Object.keys(attrs).length > 0) {
+                await fetchSyncPost("/api/attr/setBlockAttrs", { id: docId, attrs }).catch(() => {});
             }
+            const latest = storage.getSettings();
+            storage.updateSettings({
+                save: {
+                    ...latest.save,
+                    defaultNotebookId: nbSelect.value,
+                    pathsByNotebook: { ...(latest.save.pathsByNotebook || {}), [nbSelect.value]: dir },
+                },
+            }, { emit: false });
             toast("已保存到思源", "success", 4000);
             return docId;
         } catch (e) {
@@ -126,11 +170,16 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
 
     const dialog = modal({
         title: "保存到思源",
-        width: "600px",
+        width: "620px",
         content: el("div", { class: "ar-form" }, [
             el("div", { class: "ar-form__row" }, [
                 el("label", { class: "ar-form__label" }, ["目标笔记本"]),
                 nbSelect,
+            ]),
+            el("div", { class: "ar-form__row" }, [
+                el("label", { class: "ar-form__label" }, ["保存路径"]),
+                dirInput,
+                el("div", { class: "ar-form__hint" }, ["目录会按笔记本记住；文档最终保存为「目录/文档名」。"]),
             ]),
             el("div", { class: "ar-form__row" }, [
                 el("label", { class: "ar-form__label" }, ["文档名称"]),
@@ -164,28 +213,25 @@ export async function saveToSiyuan(article: Article, settings: Settings, aiResul
     });
 }
 
-export async function saveMarkdownToSiyuan(title: string, markdown: string) {
-    let notebooks: Notebook[] = [];
-    try {
-        const r: any = await fetchSyncPost("/api/notebook/lsNotebooks", {});
-        if (r.code === 0 && r.data?.notebooks) {
-            notebooks = r.data.notebooks.filter((n: Notebook) => !n.closed);
-        }
-    } catch { /* ignore */ }
+export async function saveMarkdownToSiyuan(title: string, markdown: string, storage?: Storage) {
+    const notebooks = await listNotebooks();
     if (notebooks.length === 0) {
         toast("没有可用的笔记本", "error");
         return null;
     }
 
-    const safeName = (s: string) => (s || "untitled")
-        .replace(/[/\\:*?"<>|]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 120) || "untitled";
-    let selectedNb = notebooks[0].id;
-    const nameInput = el("input", { class: "ar-input", type: "text", value: safeName(title) }) as HTMLInputElement;
+    const settings = storage?.getSettings();
+    const preferredNb = notebooks.find((n) => n.id === settings?.save.defaultNotebookId) || notebooks[0];
+    let selectedNb = preferredNb.id;
+    const defaultDir = normalizeSaveDir(settings?.save.pathsByNotebook?.[preferredNb.id] ?? settings?.save.defaultPath ?? "/");
+    const nameInput = el("input", { class: "ar-input", type: "text", value: (sanitizePathSegment(title) || "untitled").slice(0, 120) }) as HTMLInputElement;
     const nbSelect = el("select", { class: "ar-input" }) as HTMLSelectElement;
-    notebooks.forEach((n) => nbSelect.appendChild(el("option", { value: n.id, selected: n.id === selectedNb }, [`${n.icon || "📓"} ${n.name}`])));
+    notebooks.forEach((n) => nbSelect.appendChild(el("option", { value: n.id, selected: n.id === selectedNb }, [`${notebookIcon(n.icon)} ${n.name}`])));
+    const dirInput = el("input", { class: "ar-input", type: "text", value: defaultDir, placeholder: "/ 或 /RSS/2026" }) as HTMLInputElement;
+    nbSelect.addEventListener("change", () => {
+        const latest = storage?.getSettings().save;
+        dirInput.value = normalizeSaveDir(latest?.pathsByNotebook?.[nbSelect.value] ?? latest?.defaultPath ?? "/");
+    });
     const previewEl = el("pre", { class: "ar-preview" }, [markdown.slice(0, 1500) + (markdown.length > 1500 ? "\n…" : "")]);
 
     const doSave = async () => {
@@ -193,14 +239,26 @@ export async function saveMarkdownToSiyuan(title: string, markdown: string) {
         const saveBtn = dialog.container.querySelector(".ar-save-btn") as HTMLButtonElement;
         saveBtn.disabled = true;
         saveBtn.textContent = "保存中…";
+        const dir = normalizeSaveDir(dirInput.value);
         try {
+            await ensureDirPath(selectedNb, dir);
             const r: any = await fetchSyncPost("/api/filetree/createDocWithMd", {
                 notebook: selectedNb,
-                path: "/" + safeName(nameInput.value || title),
+                path: buildSavePath(dir, nameInput.value || title),
                 markdown,
             });
             if (r.code !== 0 || !r.data) throw new Error(r.msg || "创建文档失败");
             await fetchSyncPost("/api/sqlite/flushTransaction", {}).catch(() => {});
+            if (storage) {
+                const latest = storage.getSettings();
+                storage.updateSettings({
+                    save: {
+                        ...latest.save,
+                        defaultNotebookId: selectedNb,
+                        pathsByNotebook: { ...(latest.save.pathsByNotebook || {}), [selectedNb]: dir },
+                    },
+                }, { emit: false });
+            }
             toast("已保存到思源", "success", 4000);
             return r.data as string;
         } catch (e) {
@@ -213,9 +271,10 @@ export async function saveMarkdownToSiyuan(title: string, markdown: string) {
 
     const dialog = modal({
         title: "保存日报到思源",
-        width: "600px",
+        width: "620px",
         content: el("div", { class: "ar-form" }, [
             el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["目标笔记本"]), nbSelect]),
+            el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["保存路径"]), dirInput]),
             el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["文档名称"]), nameInput]),
             el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["预览"]), el("div", { class: "ar-preview-wrap" }, [previewEl])]),
         ]),
@@ -226,7 +285,13 @@ export async function saveMarkdownToSiyuan(title: string, markdown: string) {
     });
 }
 
-function composeMd(article: Article, settings: Settings, aiResults: Record<string, AIResult>, selectedAI: string[], _notebook: string): string {
+function composeMd(
+    article: Article,
+    settings: Settings,
+    aiResults: Record<string, AIResult>,
+    selectedAI: string[],
+    opts: { sourceName?: string; includeLink: boolean },
+): string {
     const cleaned = (article.content || "").replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "");
     const tmp = document.createElement("div");
     tmp.innerHTML = cleaned;
@@ -241,8 +306,8 @@ function composeMd(article: Article, settings: Settings, aiResults: Record<strin
         title: article.title || "(无标题)",
         author: article.author || "未知",
         date: new Date(article.pubDate).toLocaleDateString("zh-CN"),
-        link: article.link || "",
-        source: "",
+        link: opts.includeLink ? (article.link || "") : "",
+        source: opts.sourceName || "",
         content: md,
         summary: aiMd,
         description: article.description || "",
@@ -250,6 +315,12 @@ function composeMd(article: Article, settings: Settings, aiResults: Record<strin
     let out = settings.save.template;
     for (const k of Object.keys(vars)) {
         out = out.replace(new RegExp(`\\{\\{${k}\\}\\}`, "g"), vars[k]);
+    }
+    if (!opts.includeLink) {
+        out = out
+            .replace(/\[原文\]\(\s*\)/g, "")
+            .replace(/^custom-ai-rss-(?:link|source):\s*$/gm, "")
+            .replace(/[ \t]*·[ \t]*(?=\r?\n|$)/g, "");
     }
     return out;
 }
@@ -293,7 +364,7 @@ function htmlToMd(node: Node, depth = 0): string {
         }
         case "a": {
             const href = n.getAttribute("href") || "";
-            return href ? `[${inlineToStr(n)}(${href})]` : inlineToStr(n);
+            return href ? `[${inlineToStr(n)}](${href})` : inlineToStr(n);
         }
         case "img": {
             const src = n.getAttribute("src") || "";

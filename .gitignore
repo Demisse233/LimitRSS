@@ -4,6 +4,7 @@ package.zip
 index.js
 index.css
 i18n/
+.test-dist/
 *.log
 .DS_Store
 .idea/

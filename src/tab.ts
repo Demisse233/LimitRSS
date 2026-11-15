@@ -15,7 +15,7 @@ import { saveMarkdownToSiyuan, saveToSiyuan } from "./save";
 import { openSettings } from "./settings";
 import { applyDisplaySettings } from "./theme";
 import DOMPurify from "dompurify";
-import { genId } from "./util";
+import { genId, dailySignature, isEditableElement, isHttpUrl } from "./util";
 
 // =============== 工具 ===============
 
@@ -116,6 +116,7 @@ function displayDate(key: string): string {
 function htmlToPlainText(html: string): string {
     const tmp = document.createElement("div");
     tmp.innerHTML = html || "";
+    tmp.querySelectorAll("script,style,noscript").forEach((node) => node.remove());
     return (tmp.textContent || "").replace(/\s+/g, " ").trim();
 }
 
@@ -520,12 +521,35 @@ class Sidebar {
             renderInstancePicker();
             return instanceResults.get(selectedInstance)?.feed;
         };
+        const iconInput = el("input", {
+            class: "ar-input",
+            type: "url",
+            placeholder: "https://example.com/icon.png（可选）",
+        }) as HTMLInputElement;
         const previewIcon = el("img", { class: "ar-add-preview__icon", alt: "" }) as HTMLImageElement;
         previewIcon.style.display = "none";
-        const previewUrl = el("span", { class: "ar-add-preview__url" }, ["(尚未测试)"]);
+        const previewUrl = el("span", { class: "ar-add-preview__url" }, ["(留空时自动获取站点图标)"]);
+        let autoFavicon = "";
+        const renderIconPreview = (url: string, fallbackText = "(留空时自动获取站点图标)") => {
+            const value = (url || "").trim();
+            if (!value) {
+                previewIcon.style.display = "none";
+                previewIcon.removeAttribute("src");
+                previewUrl.textContent = fallbackText;
+                return;
+            }
+            previewIcon.style.display = "";
+            previewIcon.src = value;
+            previewUrl.textContent = value;
+        };
         previewIcon.addEventListener("error", () => {
             previewIcon.style.display = "none";
             previewUrl.textContent = `(图标加载失败：${previewIcon.src})`;
+        });
+        iconInput.addEventListener("input", () => {
+            const custom = iconInput.value.trim();
+            if (custom) renderIconPreview(custom);
+            else renderIconPreview(autoFavicon, autoFavicon ? undefined : "(留空时自动获取站点图标)");
         });
         const previewRow = el("div", { class: "ar-form__row ar-add-preview" }, [
             el("label", { class: "ar-form__label" }, ["图标预览"]),
@@ -534,9 +558,15 @@ class Sidebar {
         const test = async () => {
             const url = urlInput.value.trim();
             if (!url) return toast("请先填写 URL", "warn");
+            const customIcon = iconInput.value.trim();
+            if (customIcon && !isHttpUrl(customIcon)) return toast("图标 URL 必须以 http:// 或 https:// 开头", "warn");
             resultEl.textContent = "抓取中…";
-            previewIcon.style.display = "none";
-            previewUrl.textContent = "(解析中…)";
+            if (customIcon) {
+                renderIconPreview(customIcon);
+            } else {
+                previewIcon.style.display = "none";
+                previewUrl.textContent = "(解析中…)";
+            }
             try {
                 const f = isRSSHubUrl()
                     ? await testRSSHubInstances()
@@ -546,6 +576,10 @@ class Sidebar {
                 if (f.siteUrl) urlInput.dataset.siteUrl = f.siteUrl;
                 if (f.description) urlInput.dataset.description = f.description;
                 resultEl.textContent = `✓ 抓取成功：${f.title}（${f.articles.length} 篇）`;
+                if (iconInput.value.trim()) {
+                    renderIconPreview(iconInput.value.trim());
+                    return;
+                }
                 // 异步解析图标，让用户立刻看到抓取结果；icon 解析完后回填预览
                 const faviconInfo = await resolveSubscriptionFavicon({
                     feedFavicon: f.favicon,
@@ -553,18 +587,20 @@ class Sidebar {
                     always: true,
                 });
                 if (faviconInfo.favicon) {
-                    previewIcon.src = faviconInfo.favicon;
-                    previewIcon.style.display = "";
-                    previewUrl.textContent = faviconInfo.favicon;
-                    urlInput.dataset.favicon = faviconInfo.favicon;
+                    autoFavicon = faviconInfo.favicon;
+                    renderIconPreview(autoFavicon);
+                    urlInput.dataset.favicon = autoFavicon;
                 } else {
+                    autoFavicon = "";
                     previewIcon.style.display = "none";
                     previewUrl.textContent = "(feed 与站点首页都没找到图标，将用 /favicon.ico 兜底)";
                 }
             } catch (e) {
                 resultEl.textContent = `抓取失败：${(e as Error).message}`;
-                previewIcon.style.display = "none";
-                previewUrl.textContent = "(抓取失败，未获取到图标)";
+                if (!iconInput.value.trim()) {
+                    previewIcon.style.display = "none";
+                    previewUrl.textContent = "(抓取失败，未获取到图标)";
+                }
             }
         };
         const autoTestRSSHub = debounce(() => {
@@ -581,6 +617,10 @@ class Sidebar {
         const doSave = async () => {
             const url = urlInput.value.trim();
             if (!url) return toast("请填写 URL", "warn");
+            const customIcon = iconInput.value.trim();
+            if (customIcon && !isHttpUrl(customIcon)) {
+                return toast("图标 URL 必须以 http:// 或 https:// 开头", "warn");
+            }
             let parsed: Awaited<ReturnType<typeof fetchAndParse>> | undefined;
             try {
                 if (isRSSHubUrl()) {
@@ -595,11 +635,13 @@ class Sidebar {
                 return toast("订阅源不可用：" + (e as Error).message, "error", 4000);
             }
             const name = nameInput.value.trim() || parsed.title || url;
-            const faviconInfo = await resolveSubscriptionFavicon({
-                feedFavicon: parsed.favicon || urlInput.dataset.favicon,
-                siteUrl: parsed.siteUrl || urlInput.dataset.siteUrl || url,
-                always: true,
-            });
+            const faviconInfo = customIcon
+                ? { favicon: customIcon, triedAt: Date.now(), attempted: false }
+                : await resolveSubscriptionFavicon({
+                    feedFavicon: parsed.favicon || urlInput.dataset.favicon,
+                    siteUrl: parsed.siteUrl || urlInput.dataset.siteUrl || url,
+                    always: true,
+                });
             const s: Subscription = {
                 id: genId("sub_"), url, name, enabled: true, errorCount: 0,
                 categoryId: categoryId && categoryId !== "c_default" ? categoryId : undefined,
@@ -607,7 +649,7 @@ class Sidebar {
                 siteUrl: parsed.siteUrl || urlInput.dataset.siteUrl,
                 description: parsed.description || urlInput.dataset.description,
                 favicon: faviconInfo.favicon || fallbackFavicon(parsed.siteUrl || url),
-                faviconTriedAt: faviconInfo.attempted ? faviconInfo.triedAt : undefined,
+                faviconTriedAt: customIcon ? undefined : (faviconInfo.attempted ? faviconInfo.triedAt : undefined),
                 sortOrder: this.storage.getSubs().length, createdAt: Date.now(), updatedAt: Date.now(),
             };
             const saved = await this.storage.upsertSub(s);
@@ -617,12 +659,14 @@ class Sidebar {
         };
         const dialog = modal({
             title: "添加订阅",
-            width: "480px",
+            width: "520px",
             content: el("div", {}, [
                 el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["RSS / URL *"]), urlInput]),
                 el("div", { class: "ar-form__hint" }, ["支持普通 RSS / Atom 地址，以及 Folo 使用的 rsshub:// 路由格式。"]),
                 rsshubPanel,
                 el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["显示名称"]), nameInput]),
+                el("div", { class: "ar-form__row" }, [el("label", { class: "ar-form__label" }, ["图标 URL"]), iconInput]),
+                el("div", { class: "ar-form__hint" }, ["只支持 http(s) 图片地址；留空则自动获取 feed / 站点图标。"]),
                 resultEl,
                 previewRow,
             ]),
@@ -960,7 +1004,8 @@ class Sidebar {
         ev?.stopPropagation();
         const items: DropdownItem[] = [
             { label: "立即刷新", icon: "refresh", onClick: () => this.onRefresh(s.id) },
-            { label: "重命名", icon: "edit", onClick: () => this.showRenameSubDialog(s) },
+            { label: "编辑名称和图标", icon: "edit", onClick: () => this.showEditSubDialog(s) },
+            { label: "移动到分类", icon: "folder", onClick: () => this.showMoveSubDialog(s) },
             { divider: true, label: "" },
             { label: "暂停/恢复", icon: s.enabled ? "pause" : "play", onClick: () => this.storage.patchSubMeta(s.id, { enabled: !s.enabled }) },
             { divider: true, label: "" },
@@ -971,34 +1016,77 @@ class Sidebar {
         dropdown(target, items);
     }
 
-    private showRenameSubDialog(s: Subscription) {
+    private showEditSubDialog(s: Subscription) {
         const nameInput = el("input", {
             class: "ar-input",
             type: "text",
             value: s.name,
             placeholder: "订阅源名称",
         }) as HTMLInputElement;
+        const iconInput = el("input", {
+            class: "ar-input",
+            type: "url",
+            value: s.favicon || "",
+            placeholder: "https://example.com/icon.png（可选）",
+        }) as HTMLInputElement;
+        const previewIcon = el("img", { class: "ar-add-preview__icon", alt: "" }) as HTMLImageElement;
+        const previewUrl = el("span", { class: "ar-add-preview__url" });
+        const renderIconPreview = () => {
+            const value = iconInput.value.trim();
+            if (!value) {
+                previewIcon.style.display = "none";
+                previewIcon.removeAttribute("src");
+                previewUrl.textContent = "(留空则自动使用站点图标)";
+                return;
+            }
+            previewIcon.style.display = "";
+            previewIcon.src = value;
+            previewUrl.textContent = value;
+        };
+        previewIcon.addEventListener("error", () => {
+            previewIcon.style.display = "none";
+            previewUrl.textContent = `(图标加载失败：${previewIcon.src})`;
+        });
+        iconInput.addEventListener("input", renderIconPreview);
+        renderIconPreview();
+
         const doSave = async () => {
             const name = nameInput.value.trim();
             if (!name) return toast("订阅源名称不能为空", "warn");
+            const icon = iconInput.value.trim();
+            if (icon && !isHttpUrl(icon)) return toast("图标 URL 必须以 http:// 或 https:// 开头", "warn");
             const latest = this.storage.getSub(s.id);
             if (!latest) {
                 dialog.close();
                 return toast("订阅源不存在或已被删除", "error");
             }
-            await this.storage.patchSubMeta(s.id, { name });
+            await this.storage.patchSubMeta(s.id, { name, favicon: icon });
             dialog.close();
-            toast(`已重命名为「${name}」`, "success", 1800);
+            toast(`已更新「${name}」`, "success", 1800);
         };
-        nameInput.addEventListener("keydown", (e) => {
+        const onEnter = (e: KeyboardEvent) => {
             if (e.key === "Enter") doSave();
-        });
+        };
+        nameInput.addEventListener("keydown", onEnter);
+        iconInput.addEventListener("keydown", onEnter);
+
         const dialog = modal({
-            title: "重命名订阅源",
-            width: "420px",
-            content: el("div", { class: "ar-form__row" }, [
-                el("label", { class: "ar-form__label" }, ["显示名称"]),
-                nameInput,
+            title: "编辑订阅源",
+            width: "520px",
+            content: el("div", {}, [
+                el("div", { class: "ar-form__row" }, [
+                    el("label", { class: "ar-form__label" }, ["显示名称"]),
+                    nameInput,
+                ]),
+                el("div", { class: "ar-form__row" }, [
+                    el("label", { class: "ar-form__label" }, ["图标 URL"]),
+                    iconInput,
+                ]),
+                el("div", { class: "ar-form__hint" }, ["只支持 http(s) 图片地址；留空则自动使用站点图标。"]),
+                el("div", { class: "ar-form__row ar-add-preview" }, [
+                    el("label", { class: "ar-form__label" }, ["图标预览"]),
+                    el("div", { class: "ar-add-preview__row" }, [previewIcon, previewUrl]),
+                ]),
             ]),
             footer: [
                 button({ text: "取消", variant: "ghost", onclick: () => dialog.close() }),
@@ -1009,6 +1097,33 @@ class Sidebar {
             nameInput.focus();
             nameInput.select();
         }, 0);
+    }
+
+    private showMoveSubDialog(s: Subscription) {
+        const cats = this.storage.getCats().filter((c) => c.id !== "c_default");
+        const catSelect = el("select", { class: "ar-input" }) as HTMLSelectElement;
+        catSelect.appendChild(el("option", { value: "" }, ["未分类"]));
+        cats.forEach((c) => catSelect.appendChild(el("option", { value: c.id }, [c.name])));
+        catSelect.value = this.storage.resolveSubCategoryId(s) || "";
+        const doMove = async () => {
+            const targetId = catSelect.value || undefined;
+            await this.storage.moveSubs([s.id], targetId);
+            dialog.close();
+            const targetName = targetId ? cats.find((c) => c.id === targetId)?.name || "分类" : "未分类";
+            toast(`已移动到「${targetName}」`, "success", 1800);
+        };
+        const dialog = modal({
+            title: "移动到分类",
+            width: "420px",
+            content: el("div", { class: "ar-form__row" }, [
+                el("label", { class: "ar-form__label" }, ["目标分类"]),
+                catSelect,
+            ]),
+            footer: [
+                button({ text: "取消", variant: "ghost", onclick: () => dialog.close() }),
+                button({ text: "移动", variant: "primary", onclick: doMove }),
+            ],
+        });
     }
 
     openCatMenu(target: HTMLElement, catId: string, catName: string, ev?: MouseEvent) {
@@ -1158,6 +1273,8 @@ class ArticleListView {
     private searchTimer: ReturnType<typeof setTimeout> | null = null;
     private pendingRenderAfterComposition = false;
     private restoreSearchFocus = false;
+    private searchInput: HTMLInputElement | null = null;
+    private searchTextCache = new Map<string, { content: string; fullText: string; text: string }>();
     onOpen: (id: string) => void;
     onDaily: (date: string) => void;
     onGenerateDaily: (date: string) => void;
@@ -1224,9 +1341,43 @@ class ArticleListView {
         else if (this.filter === "starred") list = list.filter((a) => a.isStarred);
         if (this.search) {
             const s = this.search.toLowerCase();
-            list = list.filter((a) => a.title.toLowerCase().includes(s) || (a.description || "").toLowerCase().includes(s));
+            list = list.filter((a) => this.searchText(a).includes(s));
         }
         return list;
+    }
+
+    /** 搜索标题、作者、摘要、RSS 正文、抓取全文和标签 */
+    private searchText(article: Article): string {
+        const content = article.content || "";
+        const fullText = article.fullText || "";
+        const cached = this.searchTextCache.get(article.id);
+        if (cached && cached.content === content && cached.fullText === fullText) return cached.text;
+        const text = [
+            article.title || "",
+            article.author || "",
+            htmlToPlainText(article.description || ""),
+            htmlToPlainText(content),
+            fullText ? htmlToPlainText(fullText) : "",
+            (article.tags || []).join(" "),
+        ].join("\n").toLowerCase();
+        if (this.searchTextCache.size > 2000) this.searchTextCache.clear();
+        this.searchTextCache.set(article.id, { content, fullText, text });
+        return text;
+    }
+
+    focusSearch() {
+        if (this.searchInput?.isConnected) {
+            this.searchInput.focus({ preventScroll: true });
+            this.searchInput.select();
+            return;
+        }
+        this.restoreSearchFocus = true;
+        this.render();
+        requestAnimationFrame(() => {
+            if (!this.searchInput) return;
+            this.searchInput.focus({ preventScroll: true });
+            this.searchInput.select();
+        });
     }
 
     getAdjacentArticle(id: string, direction: "prev" | "next"): Article | null {
@@ -1255,6 +1406,7 @@ class ArticleListView {
     }
 
     private renderDailyPanel() {
+        this.searchInput = null;
         const dates = this.getArticleDates();
         const header = el("div", { class: "ar-list__header" }, [
             el("div", { class: "ar-list__title" }, [iconLabel("wand", "AI 日报", 15)]),
@@ -1327,6 +1479,7 @@ class ArticleListView {
         // 头部
         const title = this.getHeaderTitle();
         const search = el("input", { class: "ar-input ar-list__search", type: "search", placeholder: "搜索文章标题、作者、内容…", value: this.search }) as HTMLInputElement;
+        this.searchInput = search;
         const scheduleSearch = () => {
             if (this.searchTimer) clearTimeout(this.searchTimer);
             this.searchTimer = setTimeout(() => {
@@ -1337,6 +1490,7 @@ class ArticleListView {
                 if (!needsRender) return;
                 this.search = nextSearch;
                 this.visibleCount = 30;
+                this.listScrollTop = 0;
                 this.restoreSearchFocus = document.activeElement === search;
                 this.render();
             }, 250);
@@ -1502,7 +1656,10 @@ class Reader {
     dailyReportDate = "";
     dailyArticleIds: string[] = [];
     dailyLoading = false;
+    dailyError = "";
     fromDaily = false;
+    private dailyCache = new Map<string, { report: string; citationIds: string[]; signature: string; generatedAt: number }>();
+    private dailyAbort: AbortController | null = null;
     onOpenArticle: (id: string) => void;
     onNavigateArticle: (currentId: string, direction: "prev" | "next") => void;
     getAdjacentArticle: (currentId: string, direction: "prev" | "next") => Article | null;
@@ -1573,16 +1730,25 @@ class Reader {
     }
 
     showDaily(date: string) {
-        if (this.dailyReportDate && this.dailyReportDate !== date) {
-            this.dailyReport = "";
-            this.dailyReportDate = "";
-            this.dailyArticleIds = [];
-        }
+        this.dailyAbort?.abort();
+        this.dailyAbort = null;
         this.mode = "daily";
         this.current = null;
         this.dailyDate = date;
         this.dailyLoading = false;
+        this.dailyError = "";
         this.fromDaily = false;
+        const cached = this.dailyCache.get(date);
+        const signature = dailySignature(this.getDailyArticles(date).map((a) => a.id));
+        if (cached && cached.signature === signature) {
+            this.dailyReport = cached.report;
+            this.dailyReportDate = date;
+            this.dailyArticleIds = [...cached.citationIds];
+        } else if (this.dailyReportDate !== date) {
+            this.dailyReport = "";
+            this.dailyReportDate = "";
+            this.dailyArticleIds = [];
+        }
         this.render();
     }
 
@@ -1623,7 +1789,7 @@ class Reader {
                             ? (() => button({ variant: "secondary", icon: "refresh", text: "恢复原文", title: "恢复 RSS 原文内容", onclick: () => this.revertFullText(a) }))()
                             : (() => button({ variant: "primary", icon: "download", text: "抓取全文", title: "访问原文链接解析正文，替代 RSS 摘要", onclick: () => this.fetchFullTextFor(a) }))())
                         : null,
-                    button({ variant: "primary", icon: "save", text: "保存", onclick: () => saveToSiyuan(a, settings, a.aiResults || {}).then((id) => { if (id) this.storage.setSaved(a.id, id); }) }),
+                    button({ variant: "primary", icon: "save", text: "保存", onclick: () => saveToSiyuan(a, this.storage, a.aiResults || {}).then((id) => { if (id) this.storage.setSaved(a.id, id); }) }),
                 ];
                 items.filter(Boolean).forEach((b) => actions.appendChild(b as HTMLElement));
                 return actions;
@@ -1754,7 +1920,18 @@ class Reader {
         const citationArticles = this.getDailyCitationArticles();
         const topBar = el("div", { class: "ar-rd__topbar" }, [
             el("div", { class: "ar-rd__tabs" }, [iconLabel("wand", `AI 日报 · ${displayDate(this.dailyDate)}`, 13)]),
-            button({ variant: "primary", icon: "save", text: "保存", disabled: !this.dailyReport || this.dailyLoading, onclick: () => this.saveDailyReport() }),
+            el("div", { class: "ar-rd__actions" }, [
+                button({
+                    variant: "secondary", icon: "refresh",
+                    text: this.dailyReport ? "重新生成" : "生成日报",
+                    disabled: this.dailyLoading,
+                    onclick: () => this.generateDailyReport(this.dailyDate, { force: true }),
+                }),
+                this.dailyLoading
+                    ? button({ variant: "ghost", icon: "stop", text: "停止", onclick: () => this.stopDailyReport() })
+                    : null,
+                button({ variant: "primary", icon: "save", text: "保存", disabled: !this.dailyReport || this.dailyLoading, onclick: () => this.saveDailyReport() }),
+            ].filter(Boolean) as HTMLElement[]),
         ]);
         this.root.appendChild(topBar);
         const content = el("div", { class: "ar-rd__content" });
@@ -1787,10 +1964,17 @@ class Reader {
             ].filter(Boolean) as HTMLElement[]));
         } else if (this.dailyReport) {
             content.appendChild(this.renderDailyReportBody(this.dailyReport, citationArticles));
+        } else if (this.dailyError) {
+            content.appendChild(el("div", { class: "ar-daily-hero ar-daily-hero--error" }, [
+                el("h1", {}, ["生成失败"]),
+                el("p", {}, [this.dailyError]),
+                button({ variant: "primary", icon: "refresh", text: "重试", onclick: () => this.generateDailyReport(this.dailyDate, { force: true }) }),
+            ]));
         } else {
             content.appendChild(el("div", { class: "ar-daily-hero" }, [
                 el("h1", {}, ["AI 日报"]),
                 el("p", {}, [`${displayDate(this.dailyDate)} · ${articles.length} 篇文章`]),
+                button({ variant: "primary", icon: "wand", text: "生成日报", onclick: () => this.generateDailyReport(this.dailyDate, { force: true }) }),
             ]));
         }
         content.addEventListener("click", (event) => {
@@ -1808,7 +1992,7 @@ class Reader {
     private saveDailyReport() {
         if (!this.dailyReport || this.dailyLoading) return;
         const markdown = this.linkDailyCitations(this.dailyReport, this.getDailyCitationArticles());
-        saveMarkdownToSiyuan(`${displayDate(this.dailyDate)} AI 日报`, markdown);
+        saveMarkdownToSiyuan(`${displayDate(this.dailyDate)} AI 日报`, markdown, this.storage);
     }
 
     private getDailyArticles(date: string): Article[] {
@@ -1892,18 +2076,39 @@ class Reader {
         });
     }
 
-    async generateDailyReport(date: string) {
+    async generateDailyReport(date: string, options: { force?: boolean } = {}) {
         const articles = this.getDailyArticles(date);
         if (!articles.length) return toast("这一天没有文章", "warn");
         if (!this.ai.providers().length) return toast("请先在设置中配置 AI 提供商", "error", 5000);
+
+        const citationIds = articles.map((article) => article.id);
+        const signature = dailySignature(citationIds);
+        const cached = this.dailyCache.get(date);
+        const force = options.force !== false;
+
         this.dailyDate = date;
         this.dailyReportDate = date;
-        this.dailyArticleIds = articles.map((article) => article.id);
+        this.dailyArticleIds = [...citationIds];
+        this.dailyError = "";
+
+        if (!force && cached && cached.signature === signature) {
+            this.dailyReport = cached.report;
+            this.dailyArticleIds = [...cached.citationIds];
+            this.dailyLoading = false;
+            this.render();
+            return;
+        }
+
+        this.dailyAbort?.abort();
+        const controller = new AbortController();
+        this.dailyAbort = controller;
         this.dailyLoading = true;
         this.dailyReport = "";
         this.render();
+
         try {
             let full = "";
+            let reasoningChars = 0;
             const fakeArticle = {
                 id: `daily_${date}`,
                 subscriptionId: "",
@@ -1917,29 +2122,67 @@ class Reader {
                 isStarred: false,
             } as Article;
             const dailyPrompt = { ...DAILY_REPORT_PROMPT, ...(this.ai.getPrompt(DAILY_REPORT_PROMPT.id) || {}) };
+            // 日报通常较长；推理模型会先输出 reasoning_content，给正文留出足够预算
+            const provider = this.ai.defaultProvider();
+            const maxTokens = Math.max(provider?.maxTokens ?? 2048, 8192);
             await this.ai.streamRenderedTemplate(fakeArticle, dailyPrompt, this.buildDailyPrompt(date, articles), {
+                signal: controller.signal,
                 onChunk: (chunk) => {
+                    if (this.dailyAbort !== controller) return;
                     full += chunk;
                     this.dailyReport = full;
+                    const desc = this.root.querySelector<HTMLElement>(".ar-daily-generating__desc");
+                    if (desc) desc.textContent = `正在输出日报…（${full.length} 字）`;
                     this.updateDailyReport();
                 },
+                onReasoning: (chunk) => {
+                    if (this.dailyAbort !== controller) return;
+                    reasoningChars += chunk.length;
+                    const desc = this.root.querySelector<HTMLElement>(".ar-daily-generating__desc");
+                    if (desc) desc.textContent = `模型正在思考…（${reasoningChars} 字）`;
+                },
                 onDone: (final) => {
+                    if (this.dailyAbort !== controller) return;
                     this.dailyReport = final || full;
                     this.dailyLoading = false;
+                    this.dailyCache.set(date, {
+                        report: this.dailyReport,
+                        citationIds: [...citationIds],
+                        signature,
+                        generatedAt: Date.now(),
+                    });
                     this.render();
                 },
-                onError: (err) => {
-                    this.dailyLoading = false;
-                    this.dailyReport = `生成失败：${err.message}`;
-                    this.render();
-                    toast("AI 日报生成失败：" + err.message, "error", 5000);
+                onError: () => {
+                    // 统一在外层 catch 处理，避免 onError + catch 重复渲染
                 },
-            });
+            }, undefined, { maxTokens, disableThinking: true });
         } catch (e) {
+            if (this.dailyAbort !== controller) return;
             this.dailyLoading = false;
-            this.dailyReport = `生成失败：${(e as Error).message}`;
+            if (controller.signal.aborted) {
+                this.dailyError = "";
+                this.render();
+                return;
+            }
+            this.dailyError = (e as Error).message || "未知错误";
+            this.dailyReport = "";
             this.render();
+            toast("AI 日报生成失败：" + this.dailyError, "error", 5000);
+        } finally {
+            if (this.dailyAbort === controller) this.dailyAbort = null;
         }
+    }
+
+    stopDailyReport() {
+        if (!this.dailyLoading) return;
+        const controller = this.dailyAbort;
+        this.dailyAbort = null;
+        controller?.abort();
+        this.dailyLoading = false;
+        this.dailyError = "";
+        this.render();
+        toast("已停止生成", "info", 1600);
     }
 
     private updateDailyReport() {
@@ -2022,6 +2265,15 @@ class Reader {
         c.appendChild(stage);
     }
 
+    toggleSummary(a: Article) {
+        if (this.summaryVisible) {
+            this.summaryVisible = false;
+            this.render();
+            return;
+        }
+        this.showInlinePrompt(a, SUMMARY_PROMPT);
+    }
+
     showInlinePrompt(a: Article, prompt: PromptTemplate) {
         this.mode = "article";
         if (prompt.id === SUMMARY_PROMPT.id) this.summaryVisible = true;
@@ -2091,12 +2343,13 @@ class Reader {
                 el("span", {}, [r.promptName]),
                 el("span", { style: { flex: "1" } }),
                 r.usage ? el("span", { class: "ar-rd__ai-meta" }, [iconLabel("chart", `${r.usage.totalTokens} tokens`, 12)]) : null,
+                r.viaProxy ? el("span", { class: "ar-rd__ai-meta" }, [iconLabel("shield", "内核代理", 12)]) : null,
                 el("span", { class: "ar-rd__ai-meta" }, [iconLabel("clock", `${Math.round((r.durationMs || 0) / 100) / 10}s`, 12)]),
             ]),
             el("div", { class: "ar-rd__ai-card-body", html: mdToHtml(r.content) }),
             el("div", { class: "ar-rd__ai-card-foot" }, [
                 button({ variant: "ghost", size: "xs", icon: "copy", text: "复制", onclick: () => { navigator.clipboard.writeText(r.content); toast("已复制", "success"); } }),
-                button({ variant: "primary", size: "xs", icon: "save", text: "附加到思源", onclick: () => saveToSiyuan(a, this.storage.getSettings(), { [pid]: r }).then((id) => { if (id) this.storage.setSaved(a.id, id); }) }),
+                button({ variant: "primary", size: "xs", icon: "save", text: "附加到思源", onclick: () => saveToSiyuan(a, this.storage, { [pid]: r }).then((id) => { if (id) this.storage.setSaved(a.id, id); }) }),
             ]),
         ]);
     }
@@ -2135,12 +2388,9 @@ class Reader {
                     full += chunk;
                     body.innerHTML = mdToHtml(full);
                 },
-                onDone: async (final) => {
+                onDone: (final) => {
                     body.innerHTML = mdToHtml(final);
                     head.querySelector(".ar-rd__ai-streaming")?.remove();
-                    a.aiResults = a.aiResults || {};
-                    a.aiResults[promptId] = r;
-                    await this.storage.setAIResult(a.id, promptId, r);
                 },
                 onError: (err) => {
                     head.querySelector(".ar-rd__ai-streaming")?.remove();
@@ -2148,6 +2398,9 @@ class Reader {
                     toast("AI 调用失败：" + err.message, "error", 5000);
                 },
             });
+            a.aiResults = a.aiResults || {};
+            a.aiResults[promptId] = r;
+            await this.storage.setAIResult(a.id, promptId, r);
         } catch (e) {
             head.querySelector(".ar-rd__ai-streaming")?.remove();
             body.innerHTML = `<div style="color: var(--ar-error)">${escapeHtml((e as Error).message)}</div>`;
@@ -2191,13 +2444,9 @@ class Reader {
                     full += chunk;
                     body.innerHTML = mdToHtml(full);
                 },
-                onDone: async (final) => {
+                onDone: (final) => {
                     body.innerHTML = mdToHtml(final);
                     head.querySelector(".ar-rd__ai-streaming")?.remove();
-                    a.aiResults = a.aiResults || {};
-                    a.aiResults[prompt.id] = r;
-                    await this.storage.setAIResult(a.id, prompt.id, r);
-                    this.render();
                 },
                 onError: (err) => {
                     head.querySelector(".ar-rd__ai-streaming")?.remove();
@@ -2205,6 +2454,10 @@ class Reader {
                     toast("AI 调用失败：" + err.message, "error", 5000);
                 },
             });
+            a.aiResults = a.aiResults || {};
+            a.aiResults[prompt.id] = r;
+            await this.storage.setAIResult(a.id, prompt.id, r);
+            this.render();
         } catch (e) {
             head.querySelector(".ar-rd__ai-streaming")?.remove();
             body.innerHTML = `<div style="color: var(--ar-error)">${escapeHtml((e as Error).message)}</div>`;
@@ -2408,6 +2661,7 @@ export class RssTab {
     private autoRefreshTimer?: number;
     private refreshInterval?: number;
     private refreshDoneTimer?: number;
+    private keyHandler?: (event: KeyboardEvent) => void;
 
     constructor(root: HTMLElement, storage: Storage, ai: AIService) {
         this.root = root;
@@ -2431,12 +2685,7 @@ export class RssTab {
         });
         (this.sidebar as any)._ai = ai;  // 注入 ai 给设置
         (this.sidebar as any).onRefresh = (id: string, options?: { silent?: boolean }) => this.refreshOne(id, options);
-        const openArticle = (id: string, options: { centerInList?: boolean } = {}) => {
-            const article = this.storage.getArticle(id) || null;
-            this.reader.showArticle(article);
-            if (article && !article.isRead) this.storage.setRead(article.id, true);
-            this.list.setActiveArticle(id, { center: options.centerInList });
-        };
+        const openArticle = (id: string, options: { centerInList?: boolean } = {}) => this.openArticleById(id, options);
         const openAdjacentArticle = (currentId: string, direction: "prev" | "next") => {
             const article = this.list.getAdjacentArticle(currentId, direction);
             if (!article) return;
@@ -2462,6 +2711,9 @@ export class RssTab {
         );
         this.reader = new Reader(readerEl, storage, ai, openArticleFromDaily, openAdjacentArticle, (currentId, direction) => this.list.getAdjacentArticle(currentId, direction));
 
+        this.keyHandler = (event) => this.handleShortcut(event);
+        document.addEventListener("keydown", this.keyHandler, true);
+
         this.storage.cleanupExpiredArticles();
 
         // 自动刷新
@@ -2476,12 +2728,206 @@ export class RssTab {
     }
 
     destroy() {
+        if (this.keyHandler) {
+            document.removeEventListener("keydown", this.keyHandler, true);
+            this.keyHandler = undefined;
+        }
         if (this.autoRefreshTimer) window.clearTimeout(this.autoRefreshTimer);
         if (this.refreshInterval) window.clearInterval(this.refreshInterval);
         if (this.refreshDoneTimer) window.clearTimeout(this.refreshDoneTimer);
         this.autoRefreshTimer = undefined;
         this.refreshInterval = undefined;
         this.refreshDoneTimer = undefined;
+    }
+
+    private openArticleById(id: string, options: { centerInList?: boolean } = {}) {
+        const article = this.storage.getArticle(id) || null;
+        this.reader.showArticle(article);
+        if (article && !article.isRead) this.storage.setRead(article.id, true);
+        this.list.setActiveArticle(id, { center: options.centerInList });
+    }
+
+    private isOwnTabVisible(): boolean {
+        return !!this.root.isConnected && this.root.getClientRects().length > 0;
+    }
+
+    private hasBlockingDialog(): boolean {
+        return Array.from(document.querySelectorAll<HTMLElement>(".ar-modal__backdrop, .b3-dialog__container"))
+            .some((node) => node.getClientRects().length > 0);
+    }
+
+    private handleShortcut(event: KeyboardEvent) {
+        if (event.defaultPrevented || event.isComposing || event.repeat) return;
+        if (!this.isOwnTabVisible() || this.hasBlockingDialog()) return;
+        if (isEditableElement(event.target)) return;
+
+        const mod = event.metaKey || event.ctrlKey;
+        const key = event.key.toLowerCase();
+        const handled = () => {
+            event.preventDefault();
+            event.stopPropagation();
+        };
+
+        if (mod && key === "s") {
+            handled();
+            void this.saveCurrentArticle();
+            return;
+        }
+        if (mod && key === "f") {
+            handled();
+            this.focusSearch();
+            return;
+        }
+        if (mod || event.altKey) return;
+
+        switch (key) {
+            case "j":
+                handled();
+                this.navigateArticle("next");
+                break;
+            case "k":
+                handled();
+                this.navigateArticle("prev");
+                break;
+            case "m":
+                handled();
+                this.toggleCurrentRead();
+                break;
+            case "s":
+                handled();
+                this.toggleCurrentStar();
+                break;
+            case "o":
+                handled();
+                this.openCurrentOriginal();
+                break;
+            case "r":
+                handled();
+                this.refreshCurrentView();
+                break;
+            case "i":
+                handled();
+                this.toggleCurrentAI();
+                break;
+            case "?":
+                handled();
+                this.showShortcutHelp();
+                break;
+        }
+    }
+
+    private navigateArticle(direction: "prev" | "next") {
+        const current = this.reader.current;
+        if (!current) {
+            const articles = this.list.getArticles();
+            const target = direction === "next" ? articles[0] : articles[articles.length - 1];
+            if (!target) {
+                toast("当前列表没有文章", "info", 1400);
+                return;
+            }
+            this.openArticleById(target.id, { centerInList: true });
+            return;
+        }
+        const target = this.list.getAdjacentArticle(current.id, direction);
+        if (!target) {
+            toast(direction === "next" ? "已经是最后一篇" : "已经是第一篇", "info", 1400);
+            return;
+        }
+        this.openArticleById(target.id, { centerInList: true });
+    }
+
+    private requireCurrentArticle(): Article | null {
+        const article = this.reader.current;
+        if (!article) toast("请先选择一篇文章", "info", 1400);
+        return article;
+    }
+
+    private toggleCurrentRead() {
+        const article = this.requireCurrentArticle();
+        if (!article) return;
+        const next = !article.isRead;
+        void this.storage.setRead(article.id, next);
+        toast(next ? "已标为已读" : "已标为未读", "success", 1200);
+    }
+
+    private toggleCurrentStar() {
+        const article = this.requireCurrentArticle();
+        if (!article) return;
+        const next = !article.isStarred;
+        void this.storage.setStar(article.id, next);
+        toast(next ? "已加星标" : "已取消星标", "success", 1200);
+    }
+
+    private openCurrentOriginal() {
+        const article = this.requireCurrentArticle();
+        if (!article) return;
+        if (!article.link) {
+            toast("这篇文章没有原文链接", "warn", 1600);
+            return;
+        }
+        if (!isHttpUrl(article.link)) {
+            toast("原文链接无效", "warn", 1600);
+            return;
+        }
+        window.open(article.link, "_blank", "noopener,noreferrer");
+    }
+
+    private async saveCurrentArticle() {
+        const article = this.requireCurrentArticle();
+        if (!article) return;
+        const id = await saveToSiyuan(article, this.storage, article.aiResults || {});
+        if (id) this.storage.setSaved(article.id, id);
+    }
+
+    private refreshCurrentView() {
+        if (this.list.refreshStatus === "refreshing") return;
+        const active = this.list.active;
+        if (this.storage.getSub(active)) void this.refreshOne(active);
+        else void this.refreshAll();
+    }
+
+    private toggleCurrentAI() {
+        const article = this.requireCurrentArticle();
+        if (!article) return;
+        this.reader.toggleSummary(article);
+    }
+
+    private focusSearch() {
+        if (this.list.active === "daily") {
+            this.sidebar.setActive("all");
+            this.list.setActive("all");
+            this.reader.showArticle(null);
+        }
+        this.list.focusSearch();
+    }
+
+    private showShortcutHelp() {
+        const rows: { keys: string[]; label: string }[] = [
+            { keys: ["J"], label: "下一篇" },
+            { keys: ["K"], label: "上一篇" },
+            { keys: ["M"], label: "切换已读 / 未读" },
+            { keys: ["S"], label: "切换星标" },
+            { keys: ["O"], label: "在浏览器打开原文" },
+            { keys: ["⌘S", "Ctrl+S"], label: "保存到思源" },
+            { keys: ["R"], label: "刷新当前列表" },
+            { keys: ["⌘F", "Ctrl+F"], label: "聚焦搜索框" },
+            { keys: ["I"], label: "显示 / 隐藏 AI 总结" },
+            { keys: ["?"], label: "显示本帮助" },
+        ];
+        const content = el("div", { class: "ar-shortcuts" });
+        rows.forEach((row) => {
+            content.appendChild(el("div", { class: "ar-shortcuts__row" }, [
+                el("span", {}, [row.label]),
+                el("span", { class: "ar-shortcuts__keys" }, row.keys.map((k) => el("kbd", {}, [k]))),
+            ]));
+        });
+        content.appendChild(el("div", { class: "ar-form__hint" }, ["在输入框、搜索框、设置项或思源编辑器中输入时，快捷键自动禁用。"]));
+        const help = modal({
+            title: "快捷键",
+            width: "520px",
+            content,
+            footer: [button({ text: "关闭", variant: "primary", onclick: () => help.close() })],
+        });
     }
 
     private async markCurrentListRead(ids: string[]) {

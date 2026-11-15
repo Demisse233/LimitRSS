@@ -40,9 +40,14 @@ export interface AIResult {
     model: string; providerId: ID;
     usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
     generatedAt: number; durationMs: number; streamed?: boolean;
+    /** 请求是否经由思源内核 forwardProxy 完成 */
+    viaProxy?: boolean;
 }
 
 export type AIProviderType = "openai" | "anthropic" | "deepseek" | "zhipu" | "groq" | "ollama" | "custom";
+
+/** auto：直连失败自动降级；direct：仅浏览器直连；proxy：强制走内核代理 */
+export type AIProxyMode = "auto" | "direct" | "proxy";
 
 export interface AIProvider {
     id: ID; type: AIProviderType; name: string;
@@ -63,13 +68,25 @@ export interface AISettings {
     prompts: PromptTemplate[];
     enableCache: boolean;
     stream: boolean;
+    /** 默认 auto，兼容旧数据 */
+    proxy?: AIProxyMode;
 }
 
 export interface Settings {
     general: { language: string; articlesPerPage: number; autoRefresh: number; fullText?: boolean; articleRetentionDays: number; rsshubBaseUrl: string; rsshubCustomInstances?: string[]; };
     display: { fontSize: number; lineHeight: number; theme: string; };
     reading: { fadeReadArticles: boolean; boundaryScrollSwitch: boolean; boundaryConfirmDelayMs: number; boundaryCooldownMs: number; boundaryTriggerDistance: number; };
-    save: { template: string; includeSourceLink: boolean; downloadImages: boolean; };
+    save: {
+        template: string;
+        includeSourceLink: boolean;
+        downloadImages: boolean;
+        /** 上次保存使用的笔记本 */
+        defaultNotebookId?: string;
+        /** 默认保存目录，例如 "/RSS" */
+        defaultPath?: string;
+        /** 按笔记本记忆上次保存目录 */
+        pathsByNotebook?: Record<string, string>;
+    };
 }
 
 // 持久化 key
@@ -109,6 +126,9 @@ export const DEFAULT_SETTINGS: Settings = {
     save: {
         template: "---\ncustom-ai-rss-source: {{source}}\ncustom-ai-rss-link: {{link}}\n---\n\n# {{title}}\n\n> {{source}} · {{date}} · [原文]({{link}})\n\n{{content}}",
         includeSourceLink: true, downloadImages: true,
+        defaultNotebookId: "",
+        defaultPath: "/",
+        pathsByNotebook: {},
     },
 };
 
@@ -119,6 +139,7 @@ export const DEFAULT_AI: AISettings = {
     prompts: DEFAULT_PROMPTS,
     enableCache: true,
     stream: true,
+    proxy: "auto",
 };
 
 // 精选订阅源（原创）

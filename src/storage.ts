@@ -199,7 +199,8 @@ export class Storage {
                     sortOrder: Math.min(existed.sortOrder ?? sub.sortOrder, sub.sortOrder ?? existed.sortOrder),
                     categoryId: sub.categoryId ?? existed.categoryId,
                     categoryName: sub.categoryName ?? existed.categoryName,
-                    favicon: sub.favicon || existed.favicon,
+                    // 允许用空字符串显式清除自定义图标；缺省时才保留旧值
+                    favicon: sub.favicon !== undefined ? sub.favicon : existed.favicon,
                     siteUrl: sub.siteUrl || existed.siteUrl,
                     description: sub.description || existed.description,
                 } : sub;

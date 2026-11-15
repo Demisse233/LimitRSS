@@ -7,9 +7,11 @@ import { modal, button, toast } from "./components";
 import { icon as makeIcon } from "./icons";
 import { Storage } from "./storage";
 import { AIService } from "./ai";
-import { AIProvider, DEFAULT_PROMPTS, PromptTemplate, Subscription } from "./types";
+import { AIProvider, AIProxyMode, DEFAULT_PROMPTS, PromptTemplate, Subscription } from "./types";
 import { applyDisplaySettings } from "./theme";
 import { fetchAndParse, listRSSHubInstances, normalizeRSSHubBaseUrl } from "./fetcher";
+import { listNotebooks } from "./save";
+import { normalizeSaveDir, notebookIcon } from "./util";
 
 const GENERIC_PROVIDER = {
     endpoint: "https://api.openai.com/v1",
@@ -363,9 +365,17 @@ function renderSubscriptions(
     onValidate: () => Promise<void>,
     onDeleteInvalid: () => Promise<void>,
 ) {
-    const rerender = () => {
+    const rerender = (preserveScroll = true) => {
+        const scroller = main.querySelector<HTMLElement>(".ar-sub-manage");
+        const scrollTop = scroller?.scrollTop || 0;
         clear(main);
         renderSubscriptions(main, s, selected, validationResults, validating, onValidate, onDeleteInvalid);
+        if (preserveScroll) {
+            requestAnimationFrame(() => {
+                const next = main.querySelector<HTMLElement>(".ar-sub-manage");
+                if (next) next.scrollTop = scrollTop;
+            });
+        }
     };
     const wrap = el("div", { class: "ar-settings__section ar-settings__section--wide ar-settings__section--subscriptions" });
     const subs = s.getSubs();
@@ -378,6 +388,8 @@ function renderSubscriptions(
     cats.filter((c) => c.id !== "c_default").forEach((c) => moveSelect.appendChild(el("option", { value: c.id }, [c.name])));
 
     wrap.appendChild(sectionTitle("订阅源"));
+    const summaryEl = el("div", { class: "ar-sub-manage__summary" }, [selectedLabel]);
+    const setDisabled = (node: HTMLElement, disabled: boolean) => { (node as HTMLButtonElement).disabled = disabled; };
     const selectAllButton = button({ text: "全选", size: "sm", variant: "secondary", disabled: subs.length === 0, onclick: () => {
         subs.forEach((sub) => selected.add(sub.id));
         rerender();
@@ -401,13 +413,22 @@ function renderSubscriptions(
         rerender();
         toast(`已删除 ${ids.length} 个订阅源`, "success");
     } });
+    const syncSelectionUi = () => {
+        const count = selected.size;
+        summaryEl.textContent = count ? `已选择 ${count} 个订阅源` : `共 ${subs.length} 个订阅源`;
+        moveSelect.disabled = count === 0;
+        setDisabled(moveButton, count === 0);
+        setDisabled(deleteButton, count === 0);
+        setDisabled(clearButton, count === 0);
+        setDisabled(selectAllButton, subs.length === 0 || count === subs.length);
+    };
     const validateButton = button({ text: validating ? "检测中…" : "检测失效源", size: "sm", variant: "secondary", disabled: validating || subs.length === 0, onclick: () => onValidate() });
     const deleteInvalidButton = button({ text: `删除失效${invalidCount ? ` ${invalidCount}` : ""}`, size: "sm", variant: "ghost", danger: true, disabled: invalidCount === 0 || validating, onclick: () => onDeleteInvalid() });
     const exportOpmlButton = button({ text: "导出 OPML", size: "sm", variant: "secondary", disabled: subs.length === 0, onclick: () => exportSubscriptionsAsOpml(s) });
 
     wrap.appendChild(el("div", { class: "ar-sub-manage__bar" }, [
         el("div", { class: "ar-sub-manage__bar-head" }, [
-            el("div", { class: "ar-sub-manage__summary" }, [selectedLabel]),
+            summaryEl,
             el("div", { class: "ar-sub-manage__selection-actions" }, [selectAllButton, clearButton]),
         ]),
         el("div", { class: "ar-sub-manage__bar-actions" }, [
@@ -435,7 +456,7 @@ function renderSubscriptions(
             ]),
         ]);
         if (group.subs.length) {
-            group.subs.forEach((sub) => block.appendChild(renderSubscriptionManageRow(sub, selected, validationResults, rerender)));
+            group.subs.forEach((sub) => block.appendChild(renderSubscriptionManageRow(sub, selected, validationResults, syncSelectionUi)));
         } else {
             block.appendChild(el("div", { class: "ar-sub-manage__empty" }, ["暂无订阅源"]));
         }
@@ -445,7 +466,12 @@ function renderSubscriptions(
     main.appendChild(wrap);
 }
 
-function renderSubscriptionManageRow(sub: Subscription, selected: Set<string>, validationResults: Map<string, SubValidationResult>, rerender: () => void) {
+function renderSubscriptionManageRow(
+    sub: Subscription,
+    selected: Set<string>,
+    validationResults: Map<string, SubValidationResult>,
+    onSelectionChange: () => void,
+) {
     const logoUrl = sub.favicon || fallbackFavicon(sub.siteUrl || sub.url);
     const logo = el("span", { class: "ar-sub-manage__logo" });
     if (logoUrl) {
@@ -467,12 +493,15 @@ function renderSubscriptionManageRow(sub: Subscription, selected: Set<string>, v
         : validation?.status === "testing" ? "ar-sub-manage__state--checking"
         : validation?.status === "ok" ? ""
         : sub.enabled ? "" : "ar-sub-manage__state--off";
-    return el("div", { class: `ar-sub-manage__row ${selected.has(sub.id) ? "ar-sub-manage__row--selected" : ""} ${validation?.status === "invalid" ? "ar-sub-manage__row--bad" : ""}` }, [
-        rawCheck(selected.has(sub.id), (checked) => {
-            if (checked) selected.add(sub.id);
-            else selected.delete(sub.id);
-            rerender();
-        }),
+    let row: HTMLElement;
+    const check = rawCheck(selected.has(sub.id), (checked) => {
+        if (checked) selected.add(sub.id);
+        else selected.delete(sub.id);
+        row.classList.toggle("ar-sub-manage__row--selected", checked);
+        onSelectionChange();
+    });
+    row = el("div", { class: `ar-sub-manage__row ${selected.has(sub.id) ? "ar-sub-manage__row--selected" : ""} ${validation?.status === "invalid" ? "ar-sub-manage__row--bad" : ""}` }, [
+        check,
         logo,
         el("div", { class: "ar-sub-manage__info" }, [
             el("div", { class: "ar-sub-manage__name" }, [sub.name || "未命名订阅"]),
@@ -481,6 +510,7 @@ function renderSubscriptionManageRow(sub: Subscription, selected: Set<string>, v
         ]),
         el("span", { class: `ar-sub-manage__state ${stateClass}` }, [stateText]),
     ].filter(Boolean) as HTMLElement[]);
+    return row;
 }
 
 function renderSave(main: HTMLElement, s: Storage) {
@@ -488,11 +518,16 @@ function renderSave(main: HTMLElement, s: Storage) {
     const settings = s.getSettings();
     wrap.appendChild(sectionTitle("保存到思源"));
     const ta = el("textarea", { class: "ar-input", rows: 8, style: { fontFamily: "var(--b3-font-family-code)", fontSize: "12px" } }, [settings.save.template]) as HTMLTextAreaElement;
-    ta.addEventListener("change", debounce(() => s.updateSettings({ save: { ...settings.save, template: ta.value } }), 400));
+    const commitTemplate = () => s.updateSettings({
+        save: { ...s.getSettings().save, template: ta.value },
+    });
+    ta.addEventListener("input", debounce(commitTemplate, 300));
+    ta.addEventListener("change", commitTemplate);
     wrap.appendChild(formRow("Markdown 模板", ta));
     wrap.appendChild(el("div", { class: "ar-form__hint" }, ["可用变量：{{title}} {{author}} {{date}} {{link}} {{source}} {{content}} {{summary}} {{description}}"]));
-    wrap.appendChild(formRow("包含原文链接", checkbox(settings.save.includeSourceLink, (v) => s.updateSettings({ save: { ...settings.save, includeSourceLink: v } }))));
-    wrap.appendChild(formRow("下载远程图片到本地", checkbox(settings.save.downloadImages, (v) => s.updateSettings({ save: { ...settings.save, downloadImages: v } }))));
+    wrap.appendChild(formRow("包含原文链接", checkbox(settings.save.includeSourceLink, (v) => s.updateSettings({ save: { ...s.getSettings().save, includeSourceLink: v } }))));
+    wrap.appendChild(formRow("下载远程图片到本地", checkbox(settings.save.downloadImages, (v) => s.updateSettings({ save: { ...s.getSettings().save, downloadImages: v } }))));
+    renderDefaultNotebookSettings(wrap, s);
     main.appendChild(wrap);
 }
 
@@ -503,6 +538,17 @@ function renderAI(main: HTMLElement, s: Storage, ai: AIService) {
     wrap.appendChild(el("div", { class: "ar-form__hint" }, [iconLabel("shield", "使用 OpenAI 兼容接口。API Key 仅保存在本地思源工作空间。", 12)]));
 
     const aiSettings = s.getAI();
+    wrap.appendChild(formRow("网络模式", select<AIProxyMode>(aiSettings.proxy || "auto", [
+        { value: "auto", label: "自动（直连失败时走思源内核代理）" },
+        { value: "direct", label: "仅直连（浏览器策略严格时可能失败）" },
+        { value: "proxy", label: "强制内核代理（不支持流式）" },
+    ], (v) => {
+        s.updateAI({ proxy: v });
+        ai.update(s.getAI());
+    })));
+    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["用 Docker 或浏览器访问思源时，直连可能被 CORS、混合内容策略拦截；自动模式会改用内核代理。代理模式拿不到流式响应，生成结束后一次性显示。"]));
+    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["AI 日报会自动使用至少 8192 Tokens，并在 DeepSeek 上关闭思考模式，避免思维链耗尽正文。"]));
+
     if (shouldCollapseLegacyProviders(aiSettings.providers)) {
         const picked = aiSettings.providers.find((p) => p.apiKey) || aiSettings.providers.find((p) => p.enabled) || aiSettings.providers[0];
         s.updateAI({
@@ -740,12 +786,39 @@ function renderPromptCard(p: PromptTemplate, idx: number, s: Storage): HTMLEleme
     return card;
 }
 
+function renderDefaultNotebookSettings(wrap: HTMLElement, s: Storage) {
+    const nbSelect = el("select", { class: "ar-input" }) as HTMLSelectElement;
+    nbSelect.disabled = true;
+    nbSelect.appendChild(el("option", { value: "" }, ["（未设置，使用第一个笔记本）"]));
+    listNotebooks().then((list) => {
+        clear(nbSelect);
+        nbSelect.appendChild(el("option", { value: "" }, ["（未设置，使用第一个笔记本）"]));
+        list.forEach((n) => nbSelect.appendChild(el("option", { value: n.id }, [`${notebookIcon(n.icon)} ${n.name}`])));
+        nbSelect.value = s.getSettings().save.defaultNotebookId || "";
+        nbSelect.disabled = false;
+    }).catch(() => { nbSelect.disabled = false; });
+    nbSelect.addEventListener("change", () => {
+        s.updateSettings({
+            save: { ...s.getSettings().save, defaultNotebookId: nbSelect.value },
+        }, { emit: false });
+    });
+    wrap.appendChild(formRow("默认笔记本", nbSelect));
+
+    const pathInput = input(s.getSettings().save.defaultPath || "/", (v) => {
+        s.updateSettings({
+            save: { ...s.getSettings().save, defaultPath: normalizeSaveDir(v) },
+        }, { emit: false });
+    });
+    wrap.appendChild(formRow("默认保存路径", pathInput));
+    wrap.appendChild(el("div", { class: "ar-form__hint" }, ["例如 /RSS。留空或 / 表示直接保存在笔记本根目录。"]));
+}
+
 function renderAbout(main: HTMLElement) {
     const wrap = el("div", { class: "ar-settings__section" });
     wrap.appendChild(el("div", { class: "ar-about" }, [
         el("div", { class: "ar-about__logo" }, [makeIcon("rssMain", 48)]),
         el("h2", {}, ["LimitRSS"]),
-        el("p", { class: "ar-about__ver" }, ["v0.1.6 · 2026-07-22"]),
+        el("p", { class: "ar-about__ver" }, ["v0.1.7 · 2026-11-15"]),
         el("p", {}, ["用 AI 收敛信息噪音的 RSS 阅读器。"]),
         el("hr"),
         el("h3", {}, ["特性"]),
